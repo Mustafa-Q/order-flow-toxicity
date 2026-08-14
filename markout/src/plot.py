@@ -14,7 +14,7 @@ from src.validate import run_validation_report, print_report
 
 
 def plot_markout_curve(
-    se_table: pl.DataFrame, sample_period: str, n_trades: int, output_path: Path
+    se_table: pl.DataFrame, sample_period: str, n_trades: int, output_path: Path, symbol: str
 ) -> None:
     plt.style.use("seaborn-v0_8-whitegrid")
     plottable = se_table.filter(pl.col("horizon") > 0).sort("horizon")
@@ -29,7 +29,7 @@ def plot_markout_curve(
     ax_bps.axhline(0, color="black", linewidth=0.8, linestyle="--")
     ax_bps.set_xscale("log")
     ax_bps.set_ylabel("Markout (bps, size-weighted)")
-    ax_bps.set_title(f"SPY passive-fill markout decay — {sample_period} (n={n_trades:,} trades)")
+    ax_bps.set_title(f"{symbol} passive-fill markout decay — {sample_period} (n={n_trades:,} trades)")
 
     frac = plottable["mean_fracspread_sw"].to_numpy()
     frac_se = plottable["se_fracspread_sw"].to_numpy()
@@ -84,6 +84,7 @@ def main():
         sample_period=sample_period,
         n_trades=len(markouts),
         output_path=output_dir / f"{symbol}_markout_curve.png",
+        symbol=symbol,
     )
     print(f"Wrote {output_dir / f'{symbol}_markout_curve.png'}")
 

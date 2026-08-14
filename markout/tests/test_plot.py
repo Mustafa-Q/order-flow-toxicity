@@ -14,6 +14,12 @@ def test_plot_markout_curve_writes_a_nonempty_png(tmp_path):
         }
     )
     out_path = tmp_path / "markout_curve.png"
-    plot_markout_curve(se_table, sample_period="2026-08-03 to 2026-08-07", n_trades=1234, output_path=out_path)
+    plot_markout_curve(
+        se_table,
+        sample_period="2026-08-03 to 2026-08-07",
+        n_trades=1234,
+        output_path=out_path,
+        symbol="SPY",
+    )
     assert out_path.exists()
     assert out_path.stat().st_size > 1000
