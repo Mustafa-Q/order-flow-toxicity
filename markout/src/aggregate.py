@@ -28,6 +28,7 @@ def standard_errors(daily: pl.DataFrame, horizons: list[float]) -> pl.DataFrame:
     rows = []
     for h in horizons:
         row = {"horizon": h, "n_days": n_days, "df": n_days - 1}
+        row["n_trades"] = int(daily["n_trades"].sum())
         for unit in ["dollars", "bps", "fracspread"]:
             for weight in ["ew", "sw"]:
                 col = f"mean_{unit}_{weight}_{h}"
