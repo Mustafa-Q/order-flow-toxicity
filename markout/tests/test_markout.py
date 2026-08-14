@@ -89,14 +89,15 @@ def test_markout_decays_when_mid_moves_against_the_maker():
 
 
 def test_h5_asof_join_with_multiple_interleaved_trades_and_quotes():
-    # Exercises the general asof-join path with >=3 trades and >=3 quote
-    # updates, interleaved in time, so each trade's h=5 lookup lands on a
-    # distinct quote and the join can't accidentally pass by only ever
+    # Exercises the general asof-join path (h > 0) with >=3 trades and >=3
+    # quote updates, interleaved in time, so each trade's h=5 lookup lands
+    # on a distinct quote and the join can't accidentally pass by only ever
     # matching a single static or single-trade quote (as the two tests
-    # above do). This is also a regression test for the union-table fix:
-    # the mid lookup table is built from quotes UNION trades' own embedded
-    # bid/ask, so a trade's own timestamp is itself a valid asof match for
-    # a *different*, later trade's horizon lookup.
+    # above do). In this fixture all three h=5 targets happen to land on a
+    # quote-stream row rather than another trade's own row -- the fixture
+    # exercises the asof join against the denser union table (mid lookup =
+    # quotes UNION trades' own embedded bid/ask), not a trade-to-trade
+    # match specifically.
     #
     # Timeline (seconds after open) and each record's (bid, ask):
     #   t=0   trade A   buy@100.01   (100.00, 100.01)
@@ -137,10 +138,9 @@ def test_h5_asof_join_with_multiple_interleaved_trades_and_quotes():
 
     result = compute_markouts(trades, quotes, horizons=[0, 5])
 
-    # h=0 also exercises the (now general, no-special-case) asof path: each
-    # trade's own embedded quote is in the union table at its own
-    # timestamp, so h=0 should still land exactly on +half spread for all
-    # three trades, regardless of trade side.
+    # h=0 is resolved from each trade's own mid_at_fill (not the asof join --
+    # see the h==0 special case in markout.py), so it should still land
+    # exactly on +half spread for all three trades, regardless of trade side.
     assert result["markout_0s_dollars"].to_list() == pytest.approx(
         [0.005, 0.005, 0.005], abs=1e-9
     )
@@ -150,4 +150,65 @@ def test_h5_asof_join_with_multiple_interleaved_trades_and_quotes():
     )
     assert result["markout_5s_fracspread"].to_list() == pytest.approx(
         [-1.0, 3.0, -1.0], abs=1e-9
+    )
+
+    # Regression guard for the bps-denominator fix: bps must use mid_at_fill
+    # (100.005, 100.015, 100.035), not price (100.01, 100.01, 100.04). These
+    # denominators differ by exactly half the quoted spread, which moves bps
+    # by ~2.5e-5 here -- five orders of magnitude above the 1e-9 tolerance
+    # below, so this assertion fails if the denominator regresses to price.
+    assert result["markout_5s_bps"].to_list() == pytest.approx(
+        [-0.4999750012494828, 1.499775033744995, -0.49982506122811543], abs=1e-9
+    )
+
+
+def test_h0_is_unambiguous_when_trades_share_a_tied_timestamp():
+    # Regression test: a single aggressive order can sweep two book levels
+    # in real MBP-1, producing two trade records with the EXACT same
+    # ts_event. Because the h>0 union table (quotes UNION trades' own
+    # embedded bid/ask) includes every trade's own row, resolving h=0 via
+    # the same join_asof as h>0 would be ambiguous on a tied timestamp --
+    # only one of the tied rows can win the asof match, so the other trade
+    # would silently get its sibling's book state instead of its own. This
+    # was reproduced concretely: without the h==0 special case in
+    # markout.py (mid_at_fill used directly, bypassing join_asof), one of
+    # two trades tied at ts_event=0 got markout_0s_dollars = -0.005
+    # (fracspread -1.0x) instead of the correct +0.005 (+1.0x) -- a sign
+    # flip, exactly the failure mode this project's h=0 check exists to
+    # catch.
+    #
+    # Trade A and Trade B both fire at t=0 (a sweep), each at its own book
+    # level; Trade C is unrelated, at t=10.
+    #   t=0  Trade A  buy@100.01  quote (100.00, 100.01)  -> half spread 0.005
+    #   t=0  Trade B  buy@100.02  quote (100.01, 100.02)  -> half spread 0.005
+    #   t=10 Trade C  sell@100.00 quote (100.00, 100.01)  -> half spread 0.005
+    # Every trade's own price sits exactly at its own bid or ask, so h=0
+    # must equal +half spread (+1.0x fracspread) for all three, regardless
+    # of which other trade(s) share its timestamp.
+    trades = pl.DataFrame(
+        {
+            "ts_event": [_ts(0), _ts(0), _ts(10)],
+            "price": [100.01, 100.02, 100.00],
+            "size": [100.0, 50.0, 200.0],
+            "aggressor_side": [1, 1, -1],
+            "bid_px_00": [100.00, 100.01, 100.00],
+            "ask_px_00": [100.01, 100.02, 100.01],
+        }
+    ).with_columns(pl.col("ts_event").cast(pl.Datetime("ns", time_zone="America/New_York")))
+
+    quotes = pl.DataFrame(
+        {
+            "ts_event": [_ts(-1), _ts(20)],
+            "bid_px_00": [100.00, 100.00],
+            "ask_px_00": [100.01, 100.01],
+        }
+    ).with_columns(pl.col("ts_event").cast(pl.Datetime("ns", time_zone="America/New_York")))
+
+    result = compute_markouts(trades, quotes, horizons=[0])
+
+    assert result["markout_0s_dollars"].to_list() == pytest.approx(
+        [0.005, 0.005, 0.005], abs=1e-9
+    )
+    assert result["markout_0s_fracspread"].to_list() == pytest.approx(
+        [1.0, 1.0, 1.0], abs=1e-9
     )

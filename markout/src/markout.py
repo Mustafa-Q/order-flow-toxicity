@@ -34,9 +34,7 @@ def compute_markouts(
     # with quotes-only, the asof-joined mid was stale by a median of 8s /
     # p90 26s / max ~100s at h=0.1..120, producing an impossible decay curve
     # (1.00x half-spread at h=0 jumping to 6.86x at h=0.1, non-monotone
-    # after). With the union table, h=0 now also falls out correctly from
-    # the same general asof-join path (0/2000 mismatches against
-    # quoted_spread/2), so no h=0 special case is needed.
+    # after). The union table is used for every h > 0 horizon below.
     quotes_sorted = (
         pl.concat(
             [
@@ -51,6 +49,41 @@ def compute_markouts(
 
     result = base
     for h in horizons:
+        if h == 0:
+            # h=0 asks for the mid AT the trade's own timestamp -- which is
+            # exactly mid_at_fill, the trade's own embedded book state,
+            # computed above. Do NOT resolve this via join_asof against
+            # quotes_sorted (even though quotes_sorted now includes every
+            # trade's own row via the union above, which fixes staleness for
+            # h > 0): when two or more trades share the exact same
+            # ts_event -- a single aggressive order sweeping two book levels,
+            # common in real MBP-1 and never deduped anywhere upstream -- the
+            # asof match on a tied timestamp is ambiguous. Only one of the
+            # tied union-table rows can win the match, so join_asof silently
+            # hands the OTHER trade its sibling's book state instead of its
+            # own, which can sign-flip markout_0s_dollars for that trade
+            # (reproduced: two trades tied at ts_event=0 produced -0.005
+            # instead of +0.005 for one of them via the general asof path).
+            # Reading mid_at_fill directly is immune to this by construction
+            # -- each trade's own embedded quote is used for that trade,
+            # unambiguously, regardless of what else shares its timestamp.
+            joined = base.select(
+                "_trade_id", "price", "aggressor_side", "quoted_spread", "mid_at_fill",
+            ).with_columns(
+                (
+                    -pl.col("aggressor_side") * (pl.col("mid_at_fill") - pl.col("price"))
+                ).alias(f"markout_{h}s_dollars"),
+            ).with_columns(
+                (pl.col(f"markout_{h}s_dollars") / pl.col("mid_at_fill") * 1e4).alias(f"markout_{h}s_bps"),
+                (pl.col(f"markout_{h}s_dollars") / (pl.col("quoted_spread") / 2)).alias(
+                    f"markout_{h}s_fracspread"
+                ),
+            ).select(
+                "_trade_id", f"markout_{h}s_dollars", f"markout_{h}s_bps", f"markout_{h}s_fracspread"
+            )
+            result = result.join(joined, on="_trade_id", how="left")
+            continue
+
         # only carry _trade_id + target_ts into the asof join -- if this also
         # carried "ts_event" (the trade's own time), it would collide with
         # quotes_sorted's "ts_event" join key and get silently renamed by
