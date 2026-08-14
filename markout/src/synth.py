@@ -48,9 +48,16 @@ def generate_synthetic_raw_day(
             decay = np.exp(-dt / DECAY_TAU_SECONDS)
             impacts[i] = impacts[i - 1] * decay
             running_mid += rng.normal(0, 0.005)  # small idiosyncratic noise
-        impacts[i] += aggressor_sides[i] * IMPACT
+        # price this trade against impact carried over from EARLIER trades
+        # only -- do NOT let a trade's own kick affect its own fill price,
+        # or its own impact "reverting" after the fact looks like the
+        # passive counterparty gaining from mean reversion instead of
+        # losing to adverse selection.
         running_mid_i = running_mid + impacts[i]
         mid_path[i] = running_mid_i
+        # inject this trade's own impact -- affects subsequent trades'
+        # pricing, not its own.
+        impacts[i] += aggressor_sides[i] * IMPACT
 
     bid = np.round(mid_path - TICK / 2, 2)
     ask = bid + TICK
