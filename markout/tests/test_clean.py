@@ -1,4 +1,4 @@
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timezone
 import polars as pl
 from src.clean import (
     to_eastern,
@@ -89,7 +89,9 @@ def test_classify_aggressor_side_maps_a_and_b():
         }
     )
     result, fallback_share = classify_aggressor_side(trades, unknown_threshold=0.05)
-    assert result["aggressor_side"].to_list() == [1, -1]
+    # 'A' = seller-initiated (-1), 'B' = buyer-initiated (+1), per Databento's
+    # Side enum (Ask='A'=sell aggressor, Bid='B'=buy aggressor).
+    assert result["aggressor_side"].to_list() == [-1, 1]
     assert fallback_share == 0.0
 
 
@@ -103,8 +105,11 @@ def test_classify_aggressor_side_uses_quote_rule_fallback_under_threshold():
         }
     )
     result, fallback_share = classify_aggressor_side(trades, unknown_threshold=0.5)
-    # price 100.02 is above mid (100.005) -> quote rule says buy (+1)
-    assert result["aggressor_side"].to_list() == [1, 1]
+    # index 0: side="A" hits the direct mapping (-1, sell aggressor) regardless
+    # of price -- it never reaches the fallback rule.
+    # index 1: side="N" is unknown, so it falls back to the quote rule; price
+    # 100.02 is above mid (100.005) -> quote rule says buy (+1)
+    assert result["aggressor_side"].to_list() == [-1, 1]
     assert fallback_share == 0.5
 
 

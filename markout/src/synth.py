@@ -62,7 +62,7 @@ def generate_synthetic_raw_day(
     bid = np.round(mid_path - TICK / 2, 2)
     ask = bid + TICK
     price = np.where(aggressor_sides == 1, ask, bid)
-    side = np.where(aggressor_sides == 1, "A", "B")
+    side = np.where(aggressor_sides == 1, "B", "A")
 
     ts_event = [
         session_start + timedelta(seconds=float(off)) for off in trade_offsets

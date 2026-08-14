@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-from datetime import date
 from pathlib import Path
 
 import polars as pl
@@ -104,9 +103,9 @@ def classify_aggressor_side(
 
     result = trades.with_columns(
         pl.when(pl.col("side") == "A")
-        .then(1)
-        .when(pl.col("side") == "B")
         .then(-1)
+        .when(pl.col("side") == "B")
+        .then(1)
         .otherwise(
             pl.when(pl.col("price") > (pl.col("bid_px_00") + pl.col("ask_px_00")) / 2)
             .then(1)

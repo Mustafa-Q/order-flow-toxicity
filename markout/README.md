@@ -55,9 +55,9 @@ uv run python -m src.plot --symbol SYNTH
    this is a heuristic to revisit once real data is available. The
    sign-convention check (`X(0)` ≈ +half spread) is the primary guardrail
    against this heuristic silently contaminating results.
-7. The `side` field mapping (`'A'` = buyer-initiated / lifted the offer,
-   `'B'` = seller-initiated / hit the bid) follows Databento's documented
-   convention but has not been verified against real data yet, since no
+7. The `side` field mapping (`'A'` = seller-initiated / sell aggressor,
+   `'B'` = buyer-initiated / buy aggressor, per Databento's `Side` enum
+   documentation) has not been verified against real data yet, since no
    API key exists as of this writing. A flipped mapping would be caught
    decisively by the `h0_equals_half_spread` validation check (it would
    flip the sign of `X(0)`), not by the aggressor-buy-share check (which

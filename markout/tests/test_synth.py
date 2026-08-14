@@ -19,9 +19,12 @@ def test_generate_synthetic_raw_day_shape_and_invariants():
     spreads = (df["ask_px_00"] - df["bid_px_00"]).round(4)
     assert (spreads == 0.01).all()
 
-    # trade price always sits exactly at the prevailing bid or ask
-    at_ask = trades.filter(trades["side"] == "A")
-    at_bid = trades.filter(trades["side"] == "B")
+    # trade price always sits exactly at the prevailing bid or ask.
+    # 'B' = buy aggressor (lifts the ask), 'A' = sell aggressor (hits the
+    # bid), matching Databento's Side enum convention (Ask='A'=sell
+    # aggressor, Bid='B'=buy aggressor) that src/clean.py relies on.
+    at_ask = trades.filter(trades["side"] == "B")
+    at_bid = trades.filter(trades["side"] == "A")
     assert ((at_ask["price"] - at_ask["ask_px_00"]).abs() < 1e-9).all()
     assert ((at_bid["price"] - at_bid["bid_px_00"]).abs() < 1e-9).all()
 
