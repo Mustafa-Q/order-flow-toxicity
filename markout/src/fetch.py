@@ -111,6 +111,12 @@ def fetch_day(
         start=day.isoformat(),
         end=(day + timedelta(days=1)).isoformat(),
     )
+    # Memory risk: a full day of consolidated SPY MBP-1 is tens of millions
+    # of records, and to_df() + from_pandas() each materialize a full
+    # in-memory copy. Worth revisiting with a streaming approach (e.g.
+    # writing DBN to disk and converting from there) before running against
+    # a real multi-day pull. Untested here -- no Databento API key exists
+    # in this project yet.
     df = pl.from_pandas(store.to_df())
     df.write_parquet(out_path)
     print(f"Wrote {len(df)} rows to {out_path}")
@@ -129,7 +135,7 @@ def main():
 
     config = load_config()
     days = compute_trading_days(config["n_trading_days"])
-    if args.max_days:
+    if args.max_days is not None:
         days = days[: args.max_days]
 
     client = get_databento_client()
