@@ -23,48 +23,34 @@ def compute_markouts(
         "quoted_bid", "quoted_ask", "quoted_spread", "mid_at_fill",
     )
 
-    quotes_sorted = quotes.with_columns(
-        ((pl.col("bid_px_00") + pl.col("ask_px_00")) / 2).alias("mid")
-    ).select("ts_event", "mid").sort("ts_event")
+    # Build the mid-lookup table from the UNION of the quotes-only stream and
+    # the trades' own embedded (bid_px_00, ask_px_00). Each trade record is
+    # itself a valid book-state observation at that instant -- MBP-1
+    # co-locates top-of-book state with every record, including trades (see
+    # clean.py's classify_aggressor_side docstring) -- and in practice trades
+    # fire far more often than the separate synthetic quote-update stream, so
+    # omitting them starves every horizon's asof lookup of most of its
+    # signal. Verified on 2000 rows of synthetic data (src/synth.py, seed=1):
+    # with quotes-only, the asof-joined mid was stale by a median of 8s /
+    # p90 26s / max ~100s at h=0.1..120, producing an impossible decay curve
+    # (1.00x half-spread at h=0 jumping to 6.86x at h=0.1, non-monotone
+    # after). With the union table, h=0 now also falls out correctly from
+    # the same general asof-join path (0/2000 mismatches against
+    # quoted_spread/2), so no h=0 special case is needed.
+    quotes_sorted = (
+        pl.concat(
+            [
+                quotes.select("ts_event", "bid_px_00", "ask_px_00"),
+                trades.select("ts_event", "bid_px_00", "ask_px_00"),
+            ]
+        )
+        .with_columns(((pl.col("bid_px_00") + pl.col("ask_px_00")) / 2).alias("mid"))
+        .select("ts_event", "mid")
+        .sort("ts_event")
+    )
 
     result = base
     for h in horizons:
-        if h == 0:
-            # h=0 asks for the mid AT the trade's own timestamp. That is
-            # exactly what's already embedded on the trade record itself --
-            # MBP-1 co-locates top-of-book state with every record, including
-            # trades (see clean.py's classify_aggressor_side docstring) -- so
-            # `mid_at_fill` (computed above from the trade's own bid/ask) IS
-            # M(t_i) by definition. Routing h=0 through the same join_asof as
-            # the other horizons is unreliable: quotes_sorted only contains
-            # non-trade quote-update events, which are sampled independently
-            # of trade timestamps and can be sparse, so the backward asof
-            # search can land on a quote from well before the trade -- stale
-            # relative to the trade's own contemporaneous top-of-book.
-            # Verified on 2000 rows of synthetic data (src/synth.py, seed=1):
-            # routing h=0 through join_asof against the quotes stream made
-            # markout_0s_dollars disagree with quoted_spread/2 on 1852/2000
-            # trades (up to 0.19 off, e.g. 0.035 instead of 0.005) -- not
-            # float noise, but genuinely wrong values from a stale quote
-            # match. Using mid_at_fill instead is an algebraic identity
-            # (price sits exactly at bid or ask by construction) and always
-            # yields exactly +half spread, matching the spec's invariant.
-            joined = base.select(
-                "_trade_id", "price", "quoted_spread",
-                (
-                    -pl.col("aggressor_side") * (pl.col("mid_at_fill") - pl.col("price"))
-                ).alias(f"markout_{h}s_dollars"),
-            ).with_columns(
-                (pl.col(f"markout_{h}s_dollars") / pl.col("price") * 1e4).alias(f"markout_{h}s_bps"),
-                (pl.col(f"markout_{h}s_dollars") / (pl.col("quoted_spread") / 2)).alias(
-                    f"markout_{h}s_fracspread"
-                ),
-            ).select(
-                "_trade_id", f"markout_{h}s_dollars", f"markout_{h}s_bps", f"markout_{h}s_fracspread"
-            )
-            result = result.join(joined, on="_trade_id", how="left")
-            continue
-
         # only carry _trade_id + target_ts into the asof join -- if this also
         # carried "ts_event" (the trade's own time), it would collide with
         # quotes_sorted's "ts_event" join key and get silently renamed by
@@ -89,11 +75,15 @@ def compute_markouts(
             quotes_sorted, left_on="target_ts", right_on="ts_event", strategy="backward"
         )
         joined = joined.join(
-            base.select("_trade_id", "price", "aggressor_side", "quoted_spread"), on="_trade_id"
+            base.select("_trade_id", "price", "aggressor_side", "quoted_spread", "mid_at_fill"),
+            on="_trade_id",
         ).with_columns(
             (-pl.col("aggressor_side") * (pl.col("mid") - pl.col("price"))).alias(f"markout_{h}s_dollars"),
         ).with_columns(
-            (pl.col(f"markout_{h}s_dollars") / pl.col("price") * 1e4).alias(f"markout_{h}s_bps"),
+            # bps denominator is mid_at_fill (the mid AT the trade), per the
+            # plan's Global Constraints and the original spec's table -- the
+            # brief's reference code used `price` here, which was wrong.
+            (pl.col(f"markout_{h}s_dollars") / pl.col("mid_at_fill") * 1e4).alias(f"markout_{h}s_bps"),
             (pl.col(f"markout_{h}s_dollars") / (pl.col("quoted_spread") / 2)).alias(f"markout_{h}s_fracspread"),
         ).select(
             "_trade_id", f"markout_{h}s_dollars", f"markout_{h}s_bps", f"markout_{h}s_fracspread"
