@@ -1,0 +1,14 @@
+symbol: SPY
+stype_in: raw_symbol
+schema: mbp-1
+n_trading_days: 20
+horizons_seconds: [0, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120]
+session_start: "09:30:00"
+session_end: "16:00:00"
+timezone: "America/New_York"
+aggressor_unknown_threshold: 0.05
+auction_buffer_seconds: 1.0
+dataset_override: null
+data_raw_dir: "data/raw"
+data_processed_dir: "data/processed"
+output_dir: "output"

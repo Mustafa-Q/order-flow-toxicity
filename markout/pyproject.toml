@@ -1,0 +1,19 @@
+[project]
+name = "markout"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "databento>=0.33",
+    "polars>=1.9",
+    "numpy>=1.26",
+    "matplotlib>=3.9",
+    "pyarrow>=17.0",
+    "python-dotenv>=1.0",
+    "pyyaml>=6.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
