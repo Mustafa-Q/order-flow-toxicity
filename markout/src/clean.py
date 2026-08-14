@@ -42,7 +42,9 @@ def _hms_to_seconds(hms: str) -> float:
 
 def _seconds_since_midnight(col: str) -> pl.Expr:
     c = pl.col(col)
-    # Extract components using strftime to avoid expression evaluation issues
+    # Extract components using strftime to avoid Polars expression evaluation issues
+    # with timezone-aware datetime arithmetic (direct .dt.hour()*3600 + .dt.minute()*60
+    # produces corrupted values: e.g., 32408 instead of 34200, -11521 instead of 57599)
     hour_expr = c.dt.strftime("%H").cast(pl.Int32)
     minute_expr = c.dt.strftime("%M").cast(pl.Int32)
     second_expr = c.dt.strftime("%S").cast(pl.Int32)
