@@ -37,7 +37,9 @@ def test_quintile_cut_groups_by_trade_size():
     markouts = pl.DataFrame(
         {
             "size": [100.0, 200.0, 300.0, 400.0, 500.0],
+            "markout_0s_dollars": [0.001, 0.002, 0.003, 0.004, 0.005],
             "markout_0s_bps": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "markout_0s_fracspread": [0.1, 0.2, 0.3, 0.4, 0.5],
         }
     )
     result = quintile_cut(markouts, horizons=[0])

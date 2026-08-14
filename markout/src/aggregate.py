@@ -50,8 +50,7 @@ def quintile_cut(markouts: pl.DataFrame, horizons: list[float]) -> pl.DataFrame:
     for h in horizons:
         for unit in ["dollars", "bps", "fracspread"]:
             col = f"markout_{h}s_{unit}"
-            if col in ranked.columns:
-                agg_exprs.append(pl.col(col).mean().alias(f"mean_{unit}_{h}"))
+            agg_exprs.append(pl.col(col).mean().alias(f"mean_{unit}_{h}"))
     return ranked.group_by("size_quintile").agg(agg_exprs).sort("size_quintile")
 
 
