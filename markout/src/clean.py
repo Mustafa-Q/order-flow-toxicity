@@ -19,7 +19,7 @@ def to_eastern(df: pl.DataFrame, col: str = "ts_event") -> pl.DataFrame:
 def filter_regular_hours(
     df: pl.DataFrame, session_start: str, session_end: str, tz: str, ts_col: str = "ts_event"
 ) -> pl.DataFrame:
-    local_time = pl.col(ts_col).dt.strftime("%H:%M:%S")
+    local_time = pl.col(ts_col).dt.convert_time_zone(tz).dt.strftime("%H:%M:%S")
     return df.filter(
         (local_time >= session_start) & (local_time <= session_end)
     )
