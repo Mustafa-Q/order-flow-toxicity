@@ -73,7 +73,7 @@ def generate_synthetic_raw_day(
             "bid_sz_00": rng.integers(100, 2000, size=n_trades).astype(float),
             "ask_sz_00": rng.integers(100, 2000, size=n_trades).astype(float),
         }
-    ).with_columns(pl.col("ts_event").cast(pl.Datetime("ns")))
+    ).with_columns(pl.col("ts_event").cast(pl.Datetime("ns")).dt.replace_time_zone("UTC"))
 
     # a sparse quote-only stream between trades, same book state as the
     # most recent trade tick, so the h>0 asof join has something to find
@@ -94,7 +94,7 @@ def generate_synthetic_raw_day(
             "ask_sz_00": rng.integers(100, 2000, size=n_trades).astype(float),
         }
     ).with_columns(
-        pl.col("ts_event").cast(pl.Datetime("ns")),
+        pl.col("ts_event").cast(pl.Datetime("ns")).dt.replace_time_zone("UTC"),
         pl.col("price").cast(pl.Float64),
         pl.col("size").cast(pl.Float64),
     )
