@@ -212,3 +212,53 @@ def test_h0_is_unambiguous_when_trades_share_a_tied_timestamp():
     assert result["markout_0s_fracspread"].to_list() == pytest.approx(
         [1.0, 1.0, 1.0], abs=1e-9
     )
+
+
+def test_h5_asof_target_lands_on_another_trades_embedded_quote():
+    # Regression guard for the union-table fix: the h>0 mid-lookup table
+    # must be built from quotes UNION trades' own embedded (ts_event,
+    # bid_px_00, ask_px_00) -- not quotes alone. This fixture puts the
+    # quotes-only stream far away in time (t=-50 and t=50) so that, for
+    # Trade A's h=5 target (t=0+5=5), the nearest preceding book-state
+    # observation is NOT a quote-stream row at all -- it's Trade B's own
+    # embedded quote at t=4. A quotes-only union would skip straight past
+    # Trade B and match the stale t=-50 quote instead, giving a materially
+    # different (and wrong) result.
+    #
+    # Timeline (seconds after open) and each record's (bid, ask):
+    #   t=-50 quote     -            (99.99, 100.00)   <- quotes-only would land here
+    #   t=0   trade A   buy@100.01   (100.00, 100.01)
+    #   t=4   trade B   sell@100.02  (100.03, 100.04)  <- union-table fix should land here
+    #   t=50  quote     -            (100.10, 100.11)
+    #
+    # Trade A's h=5 target_ts = 5. Backward-asof over the union table picks
+    # the latest record at or before t=5: that's Trade B's own row at t=4
+    # (mid = (100.03+100.04)/2 = 100.035), NOT the t=-50 quote (mid=99.995).
+    #   X_A(5) = -(+1) * (100.035 - 100.01) = -0.025
+    # Under the (buggy) quotes-only union, X_A(5) would instead be
+    # -(+1) * (99.995 - 100.01) = +0.015 -- a completely different sign and
+    # magnitude, which is what makes this fixture a real regression guard.
+    trades = pl.DataFrame(
+        {
+            "ts_event": [_ts(0), _ts(4)],
+            "price": [100.01, 100.02],
+            "size": [100.0, 150.0],
+            "aggressor_side": [1, -1],
+            "bid_px_00": [100.00, 100.03],
+            "ask_px_00": [100.01, 100.04],
+        }
+    ).with_columns(pl.col("ts_event").cast(pl.Datetime("ns", time_zone="America/New_York")))
+
+    quotes = pl.DataFrame(
+        {
+            "ts_event": [_ts(-50), _ts(50)],
+            "bid_px_00": [99.99, 100.10],
+            "ask_px_00": [100.00, 100.11],
+        }
+    ).with_columns(pl.col("ts_event").cast(pl.Datetime("ns", time_zone="America/New_York")))
+
+    result = compute_markouts(trades, quotes, horizons=[0, 5])
+
+    trade_a = result.filter(pl.col("price") == 100.01)
+    assert trade_a["markout_5s_dollars"].to_list() == pytest.approx([-0.025], abs=1e-9)
+    assert trade_a["markout_5s_fracspread"].to_list() == pytest.approx([-5.0], abs=1e-9)
