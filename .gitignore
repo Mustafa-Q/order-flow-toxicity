@@ -1,0 +1,6 @@
+markout/data/raw/
+markout/data/processed/
+markout/.env
+.venv/
+__pycache__/
+*.pyc
