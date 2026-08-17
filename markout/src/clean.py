@@ -120,7 +120,18 @@ def classify_aggressor_side(
     return result, float(unknown_share)
 
 
-def clean_day(raw_path: Path, config: dict) -> tuple[pl.DataFrame, pl.DataFrame, dict]:
+def split_by_flags(trades: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Real XNAS.ITCH mbp-1 data shows a nonzero `flags` value (128 observed
+    so far) correlates strongly with unknown aggressor side and appears to
+    be largely non-displayed/hidden liquidity -- the exchange is flagging
+    these as atypical, so route them around classify_aggressor_side instead
+    of forcing them through the same classification as normal trades."""
+    normal = trades.filter(pl.col("flags") == 0)
+    excluded = trades.filter(pl.col("flags") != 0)
+    return normal, excluded
+
+
+def clean_day(raw_path: Path, config: dict) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, dict]:
     raw = pl.read_parquet(raw_path)
     raw = to_eastern(raw)
     raw = filter_regular_hours(raw, config["session_start"], config["session_end"], config["timezone"])
@@ -140,6 +151,8 @@ def clean_day(raw_path: Path, config: dict) -> tuple[pl.DataFrame, pl.DataFrame,
         trades, max_horizon, config["session_end"]
     )
 
+    trades, excluded_trades = split_by_flags(trades)
+
     trades, fallback_share = classify_aggressor_side(
         trades, config["aggressor_unknown_threshold"]
     )
@@ -150,8 +163,9 @@ def clean_day(raw_path: Path, config: dict) -> tuple[pl.DataFrame, pl.DataFrame,
         "n_dropped_auction": n_dropped_auction,
         "n_dropped_horizon": n_dropped_horizon,
         "aggressor_fallback_share": fallback_share,
+        "n_excluded_flagged": len(excluded_trades),
     }
-    return trades, quotes, stats
+    return trades, quotes, excluded_trades, stats
 
 
 def main():
@@ -167,9 +181,12 @@ def main():
 
     for raw_path in sorted(raw_dir.glob(f"{symbol}_*.parquet")):
         day_str = raw_path.stem.split(f"{symbol}_", 1)[1]
-        trades, quotes, stats = clean_day(raw_path, config)
+        trades, quotes, excluded_trades, stats = clean_day(raw_path, config)
         trades.write_parquet(processed_dir / f"{symbol}_{day_str}_trades.parquet")
         quotes.write_parquet(processed_dir / f"{symbol}_{day_str}_quotes.parquet")
+        excluded_trades.write_parquet(
+            processed_dir / f"{symbol}_{day_str}_trades_excluded.parquet"
+        )
         print(f"{day_str}: {stats}")
 
 

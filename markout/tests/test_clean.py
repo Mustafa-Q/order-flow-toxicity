@@ -48,6 +48,8 @@ from src.clean import (
     drop_auction_prints,
     drop_trades_missing_horizon,
     classify_aggressor_side,
+    split_by_flags,
+    clean_day,
 )
 
 
@@ -127,3 +129,48 @@ def test_classify_aggressor_side_raises_over_threshold():
         assert False, "expected RuntimeError"
     except RuntimeError as e:
         assert "unknown" in str(e).lower()
+
+
+def test_split_by_flags_separates_zero_from_nonzero():
+    trades = pl.DataFrame(
+        {
+            "side": ["A", "N", "N"],
+            "flags": [0, 128, 4],
+        }
+    )
+    normal, excluded = split_by_flags(trades)
+    assert normal["flags"].to_list() == [0]
+    assert excluded["flags"].to_list() == [128, 4]
+
+
+def test_clean_day_routes_nonzero_flag_trades_to_excluded_output(tmp_path):
+    # Two normal trades (flags=0, known side) and two atypical trades
+    # (flags=128, unknown side) -- all well inside RTH, away from the
+    # open/close buffer and the horizon cutoff.
+    raw = pl.DataFrame(
+        {
+            "ts_event": [_utc_ts(16, 0), _utc_ts(16, 1), _utc_ts(16, 2), _utc_ts(16, 3)],
+            "action": ["T", "T", "T", "T"],
+            "side": ["A", "B", "N", "N"],
+            "price": [100.01, 100.0, 100.02, 100.02],
+            "bid_px_00": [100.0, 100.0, 100.0, 100.0],
+            "ask_px_00": [100.01, 100.01, 100.01, 100.01],
+            "flags": [0, 0, 128, 128],
+        }
+    ).with_columns(pl.col("ts_event").cast(pl.Datetime("ns", time_zone="UTC")))
+    raw_path = tmp_path / "SPY_2026-08-06.parquet"
+    raw.write_parquet(raw_path)
+
+    config = {
+        "session_start": "09:30:00",
+        "session_end": "16:00:00",
+        "timezone": "America/New_York",
+        "auction_buffer_seconds": 0.0,
+        "horizons_seconds": [0],
+        "aggressor_unknown_threshold": 0.5,
+    }
+    trades, quotes, excluded, stats = clean_day(raw_path, config)
+
+    assert trades["flags"].to_list() == [0, 0]
+    assert excluded["flags"].to_list() == [128, 128]
+    assert stats["n_excluded_flagged"] == 2
