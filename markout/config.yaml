@@ -12,3 +12,6 @@ dataset_override: "XNAS.ITCH"
 data_raw_dir: "data/raw"
 data_processed_dir: "data/processed"
 output_dir: "output"
+feature_windows_seconds: [5, 60]
+vpin_buckets_per_day: 50
+vpin_window_buckets: 50
