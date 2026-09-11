@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import math
+from dataclasses import dataclass, field
+
 import polars as pl
 
 NS_PER_SECOND = 1_000_000_000
@@ -152,3 +155,73 @@ def run_length(aggressor_side: pl.Series) -> pl.Series:
     pos = df.select(pl.col("s").cum_count().over(pl.col("s").rle_id()).alias("pos"))["pos"]
     prev = (pos.shift(1) * aggressor_side.shift(1)).fill_null(0).cast(pl.Int64)
     return prev.alias("run_length")
+
+
+@dataclass
+class VpinState:
+    """Volume-bucket state threaded across days. completed_imbalances[k] is
+    bucket k's |buy - sell| / volume; bucket_index is the open bucket.
+    Invariant: len(completed_imbalances) == bucket_index."""
+
+    cum_volume: float = 0.0
+    bucket_index: int = 0
+    bucket_buy: float = 0.0
+    bucket_sell: float = 0.0
+    completed_imbalances: list[float] = field(default_factory=list)
+
+
+def vpin_features(
+    trades: pl.DataFrame, state: VpinState, bucket_volume: float, window: int
+) -> tuple[pl.Series, VpinState]:
+    """Easley, Lopez de Prado & O'Hara VPIN using actual aggressor side.
+    A trade in bucket k receives the mean imbalance of buckets k-window..k-1,
+    or null if fewer than `window` buckets have completed. Trades are not
+    split across bucket boundaries; a bucket skipped entirely by one
+    oversized trade has no imbalance and is left out of the mean."""
+    size = trades["size"].cast(pl.Float64)
+    side = trades["aggressor_side"]
+    cum_before = size.cum_sum() - size + state.cum_volume
+    bucket = (cum_before / bucket_volume).floor().cast(pl.Int64)
+
+    day = pl.DataFrame(
+        {
+            "bucket": bucket,
+            "buy": size * (side == 1).cast(pl.Float64),
+            "sell": size * (side == -1).cast(pl.Float64),
+        }
+    )
+    totals = day.group_by("bucket").agg(pl.col("buy").sum(), pl.col("sell").sum())
+    buy = dict(zip(totals["bucket"].to_list(), totals["buy"].to_list()))
+    sell = dict(zip(totals["bucket"].to_list(), totals["sell"].to_list()))
+    buy[state.bucket_index] = buy.get(state.bucket_index, 0.0) + state.bucket_buy
+    sell[state.bucket_index] = sell.get(state.bucket_index, 0.0) + state.bucket_sell
+
+    cum_end = state.cum_volume + float(size.sum())
+    new_index = int(cum_end // bucket_volume)
+
+    imbalances = list(state.completed_imbalances)
+    for k in range(state.bucket_index, new_index):
+        vol = buy.get(k, 0.0) + sell.get(k, 0.0)
+        imbalances.append(abs(buy.get(k, 0.0) - sell.get(k, 0.0)) / vol if vol > 0 else math.nan)
+
+    vpin_by_bucket: dict[int, float | None] = {}
+    for k in bucket.unique().to_list():
+        if k < window:
+            vpin_by_bucket[k] = None
+            continue
+        vals = [x for x in imbalances[k - window : k] if not math.isnan(x)]
+        vpin_by_bucket[k] = sum(vals) / len(vals) if vals else None
+    lookup = pl.DataFrame(
+        {"bucket": list(vpin_by_bucket), "vpin": list(vpin_by_bucket.values())},
+        schema={"bucket": pl.Int64, "vpin": pl.Float64},
+    )
+    vpin = day.select("bucket").join(lookup, on="bucket", how="left")["vpin"].alias("vpin")
+
+    new_state = VpinState(
+        cum_volume=cum_end,
+        bucket_index=new_index,
+        bucket_buy=buy.get(new_index, 0.0),
+        bucket_sell=sell.get(new_index, 0.0),
+        completed_imbalances=imbalances,
+    )
+    return vpin, new_state

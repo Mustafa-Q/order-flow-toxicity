@@ -154,3 +154,31 @@ def test_run_length_is_signed_count_of_preceding_run():
     out = run_length(pl.Series("aggressor_side", [1, 1, -1, -1, -1, 1]))
     assert out.name == "run_length"
     assert out.to_list() == [0, 1, 2, -1, -2, -3]
+
+
+def test_vpin_buckets_carry_state_across_days():
+    from src.features import VpinState, vpin_features
+
+    # bucket volume 100, window 2. Trades are assigned whole to the bucket
+    # their cumulative volume starts in.
+    day1 = pl.DataFrame({"size": [60, 60, 30, 50, 10], "aggressor_side": [1, -1, 1, 1, -1]})
+    #  cum_before: 0, 60 -> bucket 0 (buy 60, sell 60, vol 120 -> I0 = 0.0)
+    #              120, 150 -> bucket 1 (buy 80 -> I1 = 1.0)
+    #              200 -> bucket 2 (sell 10, still open)
+    v1, state = vpin_features(day1, VpinState(), bucket_volume=100.0, window=2)
+    assert v1.name == "vpin"
+    assert v1.to_list() == [None, None, None, None, pytest.approx(0.5)]
+    assert state.bucket_index == 2
+    assert state.completed_imbalances == pytest.approx([0.0, 1.0])
+    assert state.bucket_sell == pytest.approx(10.0)
+    assert state.cum_volume == pytest.approx(210.0)
+
+    day2 = pl.DataFrame({"size": [90, 20], "aggressor_side": [1, -1]})
+    #  cum_before 210 -> bucket 2 (sell 10 carried + buy 90 -> I2 = 0.8, closes at 300)
+    #  cum_before 300 -> bucket 3 -> vpin = mean(I1, I2) = 0.9
+    v2, state = vpin_features(day2, state, bucket_volume=100.0, window=2)
+    assert v2.to_list() == [pytest.approx(0.5), pytest.approx(0.9)]
+    assert state.bucket_index == 3
+    assert state.completed_imbalances == pytest.approx([0.0, 1.0, 0.8])
+    assert state.bucket_sell == pytest.approx(20.0)
+    assert state.bucket_buy == pytest.approx(0.0)
