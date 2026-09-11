@@ -80,3 +80,42 @@ def test_trade_window_features_rejects_unsorted_input():
     unsorted = _six_trades().reverse()
     with pytest.raises(ValueError):
         trade_window_features(unsorted, windows=[5])
+
+
+def _five_quote_updates() -> pl.DataFrame:
+    #   t  bid    qb   ask    qa    e
+    #   0  100.00 100  100.01 100   0   (first row)
+    #   1  100.00 150  100.01 100  +50  bid size up
+    #   2   99.99  80  100.01 100 -150  bid price down (lose qb_prev)
+    #   3   99.99  80  100.02 120 +100  ask price up (gain qa_prev)
+    #   4   99.99  80  100.02 200  -80  ask size up
+    return _frame(
+        {
+            "ts_event": [_ts(0), _ts(1), _ts(2), _ts(3), _ts(4)],
+            "bid_px_00": [100.00, 100.00, 99.99, 99.99, 99.99],
+            "ask_px_00": [100.01, 100.01, 100.01, 100.02, 100.02],
+            "bid_sz_00": [100, 150, 80, 80, 80],
+            "ask_sz_00": [100, 100, 100, 120, 200],
+        }
+    )
+
+
+def test_ofi_events_reproduce_cont_kukanov_stoikov_recurrence():
+    from src.features import ofi_events
+
+    out = ofi_events(_five_quote_updates())
+    assert out.columns == ["ts_event", "e", "cum_ofi"]
+    assert out["e"].to_list() == pytest.approx([0.0, 50.0, -150.0, 100.0, -80.0])
+    assert out["cum_ofi"].to_list() == pytest.approx([0.0, 50.0, -100.0, 0.0, -80.0])
+
+
+def test_ofi_features_window_difference_excludes_updates_at_t():
+    from src.features import ofi_events, ofi_features
+
+    cum = ofi_events(_five_quote_updates())
+    trades = _frame({"ts_event": [_ts(2.5), _ts(4), _ts(10)]})
+    out = ofi_features(trades, cum, windows=[5])
+    # t=2.5: C(2.5-) = -100, no update before t-5 -> 0       => -100
+    # t=4:   C(4-)   = C(3) = 0 (the t=4 update is excluded)  =>    0
+    # t=10:  C(10-)  = -80, C(5) = -80                         =>    0
+    assert out["ofi_5"].to_list() == pytest.approx([-100.0, 0.0, 0.0])
