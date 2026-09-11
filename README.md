@@ -19,7 +19,7 @@ of ticks.
 
 | Phase | Description | Status |
 |---|---|---|
-| 1 | Feature construction: markout curve, then order-flow features + VPIN | **Step 1 (markout curve) done on real data** |
+| 1 | Feature construction: markout curve, then order-flow features + VPIN | **Done on real data** |
 | 2 | Horse-race regression: markout ~ features, isolate VPIN's contribution | not started |
 | 3 | Simulated quoting policies (static / VPIN-gated / composite toxicity) | not started |
 | 4 | Policy comparison write-up | not started |
@@ -57,6 +57,19 @@ immediately. The full table with equal-weighted means and standard errors is
 in [`markout/output/SPY_markout_table.csv`](markout/output/SPY_markout_table.csv);
 the size-quintile cut is in
 [`markout/output/SPY_markout_quintiles.csv`](markout/output/SPY_markout_quintiles.csv).
+
+### Feature dataset
+
+Every trade in the markout table also carries the order-flow state just
+before it: signed trade imbalance, Cont–Kukanov–Stoikov order-flow
+imbalance, trade-arrival intensity, momentum, and realized volatility over
+trailing 5 s and 60 s windows; quoted spread and top-of-book depth
+imbalance at the fill; the signed run length of preceding same-side trades;
+and VPIN on volume buckets using the actual aggressor side. All windows are
+half-open and trailing, so no feature sees the trade itself or anything at
+its timestamp. Descriptive statistics are in
+[`markout/output/SPY_feature_summary.csv`](markout/output/SPY_feature_summary.csv);
+definitions are in [`markout/README.md`](markout/README.md#features).
 
 ### Read the caveats before quoting this
 

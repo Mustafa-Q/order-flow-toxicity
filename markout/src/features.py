@@ -57,8 +57,10 @@ def trade_window_features(trades: pl.DataFrame, windows: list[float]) -> pl.Data
             .otherwise(None)
             .alias(f"signed_imbalance_{lbl}"),
             (pl.col("_n").cast(pl.Float64) / w).alias(f"intensity_{lbl}"),
+            # clip: polars' sliding rolling sum can drift to ~-1e-24 when every
+            # squared change in the window is 0, and sqrt of that is NaN
             pl.when(pl.col("_n") >= 2)
-            .then(pl.col("_ss").sqrt() * 1e4)
+            .then(pl.col("_ss").clip(lower_bound=0.0).sqrt() * 1e4)
             .otherwise(None)
             .alias(f"realized_vol_{lbl}"),
         )
@@ -305,6 +307,18 @@ def run_feature_checks(df: pl.DataFrame, config: dict) -> ValidationReport:
             detail="no infinite values"
             if total_inf == 0
             else f"infinite counts={ {k: v for k, v in inf_counts.items() if v} }",
+        )
+    )
+
+    nan_counts = {c: int(df[c].cast(pl.Float64).is_nan().sum()) for c in cols}
+    total_nan = sum(nan_counts.values())
+    checks.append(
+        CheckResult(
+            "no_nans",
+            passed=total_nan == 0,
+            detail="no NaN values"
+            if total_nan == 0
+            else f"NaN counts={ {k: v for k, v in nan_counts.items() if v} }",
         )
     )
 

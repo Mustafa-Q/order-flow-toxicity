@@ -29,6 +29,7 @@ cp .env.example .env  # fill in DATABENTO_API_KEY
 uv run python -m src.fetch --max-days 1   # one day first; prints the cost estimate
 uv run python -m src.clean
 uv run python -m src.markout
+uv run python -m src.features             # per-trade order-flow features + VPIN
 uv run python -m src.aggregate
 uv run python -m src.plot                 # validation report, then the chart
 ```
@@ -59,7 +60,8 @@ uv run python -m src.plot --symbol SYNTH
 | `src/fetch.py` | Databento `mbp-1` pull, dataset pinned via `dataset_override` in `config.yaml`, cost estimate, per-day parquet cache. |
 | `src/synth.py` | Synthetic raw day in the exact `fetch.py` schema, for plumbing tests. |
 | `src/clean.py` | RTH filter (09:30–16:00 ET), UTC to New York conversion, quote validity, auction-print drop (5 s buffer), horizon-cutoff drop, `flags != 0` exclusion to a separate auditable parquet, aggressor-side classification with a quote-rule fallback. |
-| `src/markout.py` | The markout computation, all three units (dollars, bps, fraction of half-spread), horizons 0 to 120 s. |
+| `src/markout.py` | The markout computation, all three units (dollars, bps, fraction of half-spread), horizons 0 to 120 s. Carries top-of-book sizes through for the features stage. |
+| `src/features.py` | Trailing-window order-flow features and VPIN appended to every markout row, plus a descriptive summary and four sanity checks. See "Features" below. |
 | `src/aggregate.py` | Daily size- and equal-weighted means, standard errors clustered on daily means, size-quintile cut. |
 | `src/validate.py` | Six checks: `X(0)` = +half spread, buy share 45–55%, mean spread ≤ $0.02, daily trade-count stability, no NaNs, monotone-ish decay (advisory). |
 | `src/plot.py` | Two-panel chart (bps and fraction of half-spread, log-x, ±2 SE bands), gated on the blocking checks. |
@@ -69,11 +71,55 @@ uv run python -m src.plot --symbol SYNTH
 - `output/SPY_markout_curve.png` — the chart
 - `output/SPY_markout_table.csv` — one row per horizon: means, SEs, t-stats, n
 - `output/SPY_markout_quintiles.csv` — means by trade-size quintile
+- `output/SPY_feature_summary.csv` — per-feature count, null share, mean,
+  std, and 1st/50th/99th percentiles over the whole sample
 - `data/processed/SPY_<day>_markouts.parquet` (not committed) — one tidy row
-  per trade with every horizon's markout, keyed by `ts_event`, so later
-  features can be joined on.
+  per trade with every horizon's markout.
+- `data/processed/SPY_<day>_features.parquet` (not committed) — the same
+  rows as the markouts file, in the same order, with the feature columns
+  appended. This is the Phase 2 input: one file, no joins.
 - `data/processed/SPY_<day>_trades_excluded.parquet` (not committed) — the
   `flags != 0` trades routed around classification, kept for audit.
+
+## Features
+
+Every feature is computed from information timestamped strictly before the
+trade. Windowed features use trailing half-open windows [t − W, t) with
+W ∈ {5 s, 60 s} (`feature_windows_seconds` in `config.yaml`); a trade never
+sees itself or any record sharing its exact timestamp, so the legs of a
+sweep cannot see each other. Quote-stream lookups are asof at t − 1 ns.
+
+| Column | Definition | Units |
+|---|---|---|
+| `signed_imbalance_{W}` | (buy volume − sell volume) / total volume in window; null if empty | [−1, 1] |
+| `ofi_{W}` | Cont–Kukanov–Stoikov order-flow imbalance summed over top-of-book updates in window | shares |
+| `intensity_{W}` | trades in window / W | trades per second |
+| `momentum_{W}` | (mid at fill − mid at t − W) / mid at t − W | bps |
+| `realized_vol_{W}` | root sum of squared log mid changes between consecutive trades in window; null if fewer than 2 trades | bps |
+| `spread_bps` | quoted spread at fill / mid | bps |
+| `depth_imbalance` | (bid size − ask size) / (bid size + ask size) at the fill, from the trade record's own book | [−1, 1] |
+| `run_length` | signed count of consecutive same-side trades immediately before this one; 0 for the first trade of the day | trades |
+| `vpin` | mean absolute order imbalance over the last 50 volume buckets (below) | [0, 1] |
+
+**VPIN.** Buckets hold 1/50 of average daily classified volume
+(`vpin_buckets_per_day`); each bucket's imbalance is |buy − sell| / volume
+using the actual aggressor side; VPIN is the mean over the last 50 completed
+buckets (`vpin_window_buckets`), roughly one day of volume. Each trade
+receives the VPIN as of the last bucket completed before it. Bucket state
+carries across days, so `features.py` processes days in date order and a
+single day cannot be recomputed in isolation. VPIN is null for
+approximately the first trading day of the sample while the window warms
+up. A trade is assigned whole to the bucket its cumulative volume starts
+in, not split; at these bucket sizes the misallocation is negligible. On
+the current sample, ADV is 5.77M shares, so each bucket is about 115k
+shares, and VPIN becomes available after the first 108,991 trades (inside
+day one, which ran above average volume).
+
+**Checks** (blocking, printed after the run): no infinite values; no NaN
+values (this caught a polars sliding-sum drift to −3e−24 that turned 29
+realized-vol windows into NaN; now clipped at zero); null share under 1%
+for every 60 s feature; VPIN nulls form a prefix; bounded features within
+their ranges.
 
 ## What the real data showed
 
@@ -127,6 +173,8 @@ Aggressor-side coverage:
 - [x] Real Databento pull on `XNAS.ITCH`, full 20-day window (19 trading
       days plus one holiday), all validation checks pass, chart and tables
       produced.
-- [ ] Phase 1 feature construction: OFI, arrival intensity, momentum, depth
-      imbalance, run length, VPIN, each joined onto the per-trade markout
-      table by `ts_event`.
+- [x] Phase 1 feature construction: signed imbalance, OFI, arrival
+      intensity, momentum, realized vol, spread, depth imbalance, run
+      length, VPIN, appended row for row to the per-trade markout table.
+- [ ] Phase 2 horse-race regression: markout ~ features, VPIN's marginal
+      contribution isolated.

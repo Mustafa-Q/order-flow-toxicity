@@ -282,3 +282,18 @@ def test_feature_checks_catch_infinity_and_vpin_gap():
     gap = good.with_columns(pl.Series("vpin", [None, 0.3, None]))
     report = run_feature_checks(gap, _config())
     assert any(c.name == "vpin_nulls_are_prefix" and not c.passed for c in report.checks)
+
+
+def test_feature_checks_catch_nan():
+    from src.features import run_feature_checks
+
+    df = pl.DataFrame(
+        {
+            "signed_imbalance_60": [0.1, -0.2, 0.3],
+            "realized_vol_60": [0.0, float("nan"), 2.0],
+            "vpin": [None, 0.3, 0.4],
+        }
+    )
+    report = run_feature_checks(df, _config())
+    assert not report.all_blocking_passed
+    assert any(c.name == "no_nans" and not c.passed for c in report.checks)
