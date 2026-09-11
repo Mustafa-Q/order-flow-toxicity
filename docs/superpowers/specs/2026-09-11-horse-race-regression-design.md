@@ -109,17 +109,28 @@ All in `output/`, all committed.
    horizontal point-and-bar marks, vertical zero line. Made with matplotlib
    following the dataviz skill's guidance.
 
-## Sanity checks (blocking, printed like the other stages)
+## Sanity checks (printed like the other stages)
+
+Blocking:
 
 1. `n_clusters >= 10`.
 2. Every SE finite and positive.
-3. The `full` model's aligned `signed_imbalance_5` coefficient is negative
-   at the headline horizon. Flow in the aggressor's direction is the
-   canonical adverse-selection signal; a positive sign means the alignment
-   or the markout sign is wrong upstream. This is the Phase 2 analogue of
-   the `X(0) = +half spread` check.
-4. `delta_r2` for every leave-one-out model is ≥ 0 (a nested model cannot
+3. `delta_r2` for every leave-one-out model is ≥ 0 (a nested model cannot
    fit better).
+
+Advisory (reported, never blocks):
+
+4. The decile sort's realized means are non-decreasing across at least 70%
+   of adjacent deciles. In-sample, so weak by construction; it flags a
+   broken fit, not a weak signal.
+
+A draft of this spec had a blocking check that the aligned
+`signed_imbalance_5` coefficient be negative, on the grounds that signed
+flow is the canonical adverse-selection signal. On the real data that
+coefficient is indistinguishable from zero, alone or in the full model.
+That is a finding about SPY on a single-venue book, not a pipeline defect,
+so the check was removed: gates test properties of a working fit, never
+economic hypotheses.
 
 ## README content
 

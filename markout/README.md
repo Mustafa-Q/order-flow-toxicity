@@ -32,6 +32,7 @@ uv run python -m src.markout
 uv run python -m src.features             # per-trade order-flow features + VPIN
 uv run python -m src.aggregate
 uv run python -m src.plot                 # validation report, then the chart
+uv run python -m src.regress              # Phase 2 horse-race regression
 ```
 
 `fetch.py` caches one parquet per day in `data/raw/` and never re-downloads a
@@ -62,6 +63,7 @@ uv run python -m src.plot --symbol SYNTH
 | `src/clean.py` | RTH filter (09:30–16:00 ET), UTC to New York conversion, quote validity, auction-print drop (5 s buffer), horizon-cutoff drop, `flags != 0` exclusion to a separate auditable parquet, aggressor-side classification with a quote-rule fallback. |
 | `src/markout.py` | The markout computation, all three units (dollars, bps, fraction of half-spread), horizons 0 to 120 s. Carries top-of-book sizes through for the features stage. |
 | `src/features.py` | Trailing-window order-flow features and VPIN appended to every markout row, plus a descriptive summary and four sanity checks. See "Features" below. |
+| `src/regress.py` | Phase 2: pooled OLS of markouts on the features with day-clustered SEs, VPIN's marginal value, leave-one-out ranking, decile sort, coefficient chart. See "Phase 2 result" below. |
 | `src/aggregate.py` | Daily size- and equal-weighted means, standard errors clustered on daily means, size-quintile cut. |
 | `src/validate.py` | Six checks: `X(0)` = +half spread, buy share 45–55%, mean spread ≤ $0.02, daily trade-count stability, no NaNs, monotone-ish decay (advisory). |
 | `src/plot.py` | Two-panel chart (bps and fraction of half-spread, log-x, ±2 SE bands), gated on the blocking checks. |
@@ -121,6 +123,58 @@ realized-vol windows into NaN; now clipped at zero); null share under 1%
 for every 60 s feature; VPIN nulls form a prefix; bounded features within
 their ranges.
 
+## Phase 2 result: the horse race
+
+Pooled OLS of the markout (bps of mid) on all 14 features over 1,759,429
+trades and 19 days, after dropping the 7.1% of rows with a null (mostly
+the VPIN warm-up). Directional features are multiplied by aggressor side so
+positive means "flow in the direction of the incoming trade". Regressors are
+winsorized at 0.1% / 99.9% and z-scored, so a coefficient is bps of markout
+per one standard deviation of the feature. Standard errors are clustered by
+day. Headline horizon 5 s; 1 s and 60 s as robustness.
+
+![Horse-race coefficients](output/SPY_horse_race.png)
+
+**Finding.** VPIN adds nothing. In the full model its coefficient is +0.004
+bps per SD (t = 0.9); removing it changes R² by 0.0000 at every horizon;
+alone it explains 0.00% of the variance. The features that do predict
+markouts are book state, not flow history: top-of-book depth imbalance on
+the side being hit is the strongest predictor at every horizon (t = −6.4 at
+5 s, −10.2 at 1 s), followed by run length and 60 s realized volatility.
+Signed trade imbalance, the textbook adverse-selection signal, is
+indistinguishable from zero at 5 s, alone or with controls, on this
+single-venue book.
+
+| | 5 s | 1 s | 60 s |
+|---|---|---|---|
+| R², full model | 0.46% | 1.23% | 2.53% |
+| R² without VPIN | 0.46% | 1.23% | 2.53% |
+| VPIN t-stat | 0.9 | 0.8 | −0.2 |
+| Largest leave-one-out ΔR² | depth_imbalance, 0.15 pp | depth_imbalance, 0.46 pp | momentum_60, 2.34 pp |
+| Decile 10 − decile 1 realized markout | 0.28 bps | 0.21 bps | 0.62 bps |
+
+Tables: [`output/SPY_horse_race.csv`](output/SPY_horse_race.csv) (all
+coefficients), [`output/SPY_vpin_marginal.csv`](output/SPY_vpin_marginal.csv),
+[`output/SPY_leave_one_out.csv`](output/SPY_leave_one_out.csv),
+[`output/SPY_decile_sort.csv`](output/SPY_decile_sort.csv).
+
+**What the decile sort says.** Sorting fills by the model's predicted 5 s
+markout, the worst decile realizes −0.11 bps and the best +0.17 bps, a
+spread of 0.28 bps, about two ticks at SPY's price. The best-looking decile
+of fills is profitable on average. So a very low R² still carries a usable
+ordering, which is what Phase 3's quoting policies need.
+
+**Caveats.** R² of a few percent is normal for tick-level markout
+regressions and is not a failure of the features. Nineteen clusters make
+the SEs somewhat optimistic; t-statistics near 2 should not be over-read.
+VPIN's window is about one day of volume, so its identification is largely
+across days; a faster VPIN (`vpin_window_buckets: 10`) is the natural
+robustness run if anyone wants to rescue it. The decile sort is in-sample,
+though with 15 parameters and 1.76M rows overfitting is not the concern;
+regime change is. The depth-imbalance result is at least partly the
+single-venue mechanical effect: a thin queue on the hit side is exactly the
+state in which one fill empties the Nasdaq level and moves the Nasdaq mid.
+
 ## What the real data showed
 
 Nineteen trading days of `XNAS.ITCH` are on disk (2026-06-23 to
@@ -176,5 +230,8 @@ Aggressor-side coverage:
 - [x] Phase 1 feature construction: signed imbalance, OFI, arrival
       intensity, momentum, realized vol, spread, depth imbalance, run
       length, VPIN, appended row for row to the per-trade markout table.
-- [ ] Phase 2 horse-race regression: markout ~ features, VPIN's marginal
-      contribution isolated.
+- [x] Phase 2 horse-race regression: markout ~ features, VPIN's marginal
+      contribution isolated. VPIN adds nothing; depth imbalance dominates.
+- [ ] Phase 3 simulated quoting policies: static, VPIN-gated, and
+      composite-toxicity, compared on spread captured, markouts, fill rate,
+      P&L.

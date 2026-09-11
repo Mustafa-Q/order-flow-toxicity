@@ -106,16 +106,16 @@ def test_build_design_drops_nulls_and_returns_targets():
     assert d.day_labels == ["d1", "d2"]
 
 
-def _synthetic_design(seed=1, n=4000):
+def _synthetic_design(seed=1, n=4000, n_days=5):
     from src.regress import Design
 
     rng = np.random.default_rng(seed)
     names = ["signed_imbalance_5", "ofi_5", "intensity_5", "vpin"]
     X = rng.normal(size=(n, 4))
-    days = np.repeat(np.arange(5), n // 5)
+    days = np.repeat(np.arange(n_days), n // n_days)
     y5 = -2.0 * X[:, 0] + 3.0 * X[:, 1] + rng.normal(size=n)
     y1 = 0.5 * y5
-    return Design(X, names, {5: y5, 1: y1}, days, [f"d{i}" for i in range(5)], n, 0)
+    return Design(X, names, {5: y5, 1: y1}, days, [f"d{i}" for i in range(n_days)], n, 0)
 
 
 def test_run_model_set_recovers_synthetic_coefficients_and_ranks_features():
@@ -170,3 +170,24 @@ def test_decile_sort_table_means_and_spread():
     assert t["predicted_mean_bps"][0] < t["predicted_mean_bps"][9]
     assert t["realized_mean_bps"][0] < t["realized_mean_bps"][9]
     assert t["realized_mean_bps"][10] == pytest.approx(t["realized_mean_bps"][9] - t["realized_mean_bps"][0])
+
+
+def test_regression_checks_pass_with_enough_days_and_flag_too_few():
+    from src.regress import decile_sort_table, leave_one_out_table, run_model_set, run_regression_checks
+
+    d10 = _synthetic_design(n_days=10)
+    res = {5: run_model_set(d10, 5), 1: run_model_set(d10, 1)}
+    loo = leave_one_out_table(res, headline=5)
+    dec = decile_sort_table(d10, res, headline=5, n_deciles=10)
+    report = run_regression_checks(res, 5, loo, dec)
+    assert report.all_blocking_passed
+    monotone = next(c for c in report.checks if c.name == "decile_sort_monotone")
+    assert monotone.blocking is False and monotone.passed
+
+    d5 = _synthetic_design(n_days=5)
+    res5 = {5: run_model_set(d5, 5), 1: run_model_set(d5, 1)}
+    report5 = run_regression_checks(
+        res5, 5, leave_one_out_table(res5, headline=5), decile_sort_table(d5, res5, 5, 10)
+    )
+    assert not report5.all_blocking_passed
+    assert any(c.name == "enough_clusters" and not c.passed for c in report5.checks)

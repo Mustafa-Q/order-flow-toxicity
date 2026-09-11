@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass
+from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 
+from src.config import load_config
 from src.features import feature_columns
+from src.validate import CheckResult, ValidationReport, print_report
 
 
 @dataclass
@@ -224,3 +232,167 @@ def decile_sort_table(
         spread[key] = top[key] - bottom[key]
     rows.append(spread)
     return pl.DataFrame(rows)
+
+
+def run_regression_checks(
+    results_by_h: dict[float, dict[str, OlsResult]],
+    headline: float,
+    loo: pl.DataFrame,
+    deciles: pl.DataFrame,
+) -> ValidationReport:
+    """Blocking checks are properties of a working fit, not economic
+    hypotheses: an earlier version required the aligned signed-imbalance
+    coefficient to be negative, and on real SPY data it is zero. That is a
+    finding, so it belongs in the README, not in a gate."""
+    full = results_by_h[headline]["full"]
+    checks = [
+        CheckResult(
+            "enough_clusters",
+            passed=full.n_clusters >= 10,
+            detail=f"{full.n_clusters} day clusters (need >= 10)",
+        )
+    ]
+    all_se = np.concatenate([r.se for res in results_by_h.values() for r in res.values()])
+    checks.append(
+        CheckResult(
+            "finite_positive_se",
+            passed=bool(np.all(np.isfinite(all_se)) and np.all(all_se > 0)),
+            detail=f"min SE={all_se.min():.3g}, all finite={bool(np.all(np.isfinite(all_se)))}",
+        )
+    )
+    loo_cols = [col for col in loo.columns if col.startswith("delta_r2_")]
+    min_delta = min(float(loo[col].min()) for col in loo_cols)
+    checks.append(
+        CheckResult(
+            "nested_models_never_fit_better",
+            passed=min_delta >= -1e-12,
+            detail=f"min leave-one-out delta R2={min_delta:.3g}",
+        )
+    )
+    realized = deciles.filter(pl.col("decile") != "spread")["realized_mean_bps"].to_list()
+    transitions = list(zip(realized, realized[1:]))
+    non_decreasing = sum(1 for a, b in transitions if b >= a)
+    checks.append(
+        CheckResult(
+            "decile_sort_monotone",
+            passed=non_decreasing >= 0.7 * len(transitions),
+            detail=f"{non_decreasing}/{len(transitions)} decile transitions non-decreasing (in-sample)",
+            blocking=False,
+        )
+    )
+    return ValidationReport(checks=checks)
+
+
+# Categorical slots 1-3 of the dataviz reference palette, fixed order.
+SERIES_COLORS = ["#2a78d6", "#eb6834", "#1baf7a"]
+
+
+def plot_coefficients(
+    table: pl.DataFrame, horizons: list[float], headline: float, output_path: Path
+) -> None:
+    """Two panels sharing the feature axis: the headline horizon with the
+    fast robustness horizon, and the slow horizon on its own scale. The slow
+    horizon's SEs are an order of magnitude wider and would otherwise
+    squash the headline series into a sliver around zero."""
+    feats = table.filter(~pl.col("feature").is_in(["const", "r2", "n_obs", "n_days"]))
+    n_days = int(table.filter(pl.col("feature") == "n_days")[f"coef_{headline}"][0])
+    names = feats["feature"].to_list()[::-1]  # largest |t| at the top
+    ypos = {n: i for i, n in enumerate(names)}
+    ordered = [headline] + [h for h in horizons if h != headline]
+    colors = dict(zip(ordered, SERIES_COLORS))
+    panels = [ordered[:-1], ordered[-1:]] if len(ordered) > 1 else [ordered]
+
+    fig, axes = plt.subplots(
+        1, len(panels), figsize=(11, 0.42 * len(names) + 2.0), sharey=True,
+        gridspec_kw={"width_ratios": [2, 1][: len(panels)]},
+    )
+    axes = np.atleast_1d(axes)
+    for ax, group in zip(axes, panels):
+        offsets = dict(zip(group, np.linspace(0.18, -0.18, len(group)) if len(group) > 1 else [0.0]))
+        for h in group:
+            y = np.array([ypos[n] for n in feats["feature"].to_list()]) + offsets[h]
+            coef = feats[f"coef_{h}"].to_numpy()
+            se = feats[f"se_{h}"].to_numpy()
+            ax.errorbar(
+                coef, y, xerr=2 * se, fmt="o", color=colors[h], ecolor=colors[h],
+                elinewidth=1.6, capsize=0, markersize=6 if h == headline else 5,
+                markeredgecolor="white", markeredgewidth=1.0,
+                label=f"{h:g} s markout" + (" (headline)" if h == headline else ""),
+            )
+        ax.axvline(0, color="#333333", linewidth=0.8)
+        ax.grid(axis="x", color="#e2e2e2", linewidth=0.6)
+        ax.grid(axis="y", visible=False)
+        for side in ("top", "right", "left"):
+            ax.spines[side].set_visible(False)
+        ax.tick_params(axis="y", length=0)
+        ax.legend(frameon=False, loc="upper right")
+        ax.set_title(" and ".join(f"{h:g} s" for h in group) + " horizon", fontsize=10, loc="left")
+    axes[0].set_yticks(range(len(names)))
+    axes[0].set_yticklabels(names)
+    fig.supxlabel("Markout (bps) per 1 SD of feature; point = coefficient, bar = ±2 day-clustered SE")
+    fig.suptitle(
+        f"What predicts a passive fill's markout? Standardized OLS, SPY, {n_days} days", y=0.995
+    )
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--symbol", type=str, default=None)
+    args = parser.parse_args()
+
+    config = load_config()
+    symbol = args.symbol or config["symbol"]
+    processed_dir = Path(config["data_processed_dir"])
+    output_dir = Path(config["output_dir"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+    horizons = config["regression_horizons_seconds"]
+    headline = horizons[0]
+
+    frames = []
+    for path in sorted(processed_dir.glob(f"{symbol}_*_features.parquet")):
+        day_str = path.stem.split(f"{symbol}_", 1)[1].rsplit("_features", 1)[0]
+        frames.append(pl.read_parquet(path).with_columns(pl.lit(day_str).alias("date")))
+    if not frames:
+        raise RuntimeError(f"No features files found for symbol {symbol} in {processed_dir}")
+    features = pl.concat(frames)
+
+    design = build_design(features, config)
+    print(
+        f"design: {design.X.shape[0]:,} rows x {design.X.shape[1]} features over "
+        f"{len(design.day_labels)} days; dropped {design.n_dropped:,} of {design.n_total:,} "
+        f"({design.n_dropped / design.n_total:.1%}) for nulls"
+    )
+
+    results_by_h = {h: run_model_set(design, h) for h in horizons}
+    for h in horizons:
+        print(
+            f"h={h}s: full R2={results_by_h[h]['full'].r2:.4f}, "
+            f"no-VPIN R2={results_by_h[h]['no_vpin'].r2:.4f}"
+        )
+
+    table = horse_race_table(results_by_h, headline)
+    vm = vpin_marginal_table(results_by_h)
+    loo = leave_one_out_table(results_by_h, headline)
+    deciles = decile_sort_table(design, results_by_h, headline, config["n_deciles"])
+
+    table.write_csv(output_dir / f"{symbol}_horse_race.csv")
+    vm.write_csv(output_dir / f"{symbol}_vpin_marginal.csv")
+    loo.write_csv(output_dir / f"{symbol}_leave_one_out.csv")
+    deciles.write_csv(output_dir / f"{symbol}_decile_sort.csv")
+    print(f"Wrote 4 tables to {output_dir}")
+
+    report = run_regression_checks(results_by_h, headline, loo, deciles)
+    print_report(report)
+    if not report.all_blocking_passed:
+        raise SystemExit(1)
+
+    plot_coefficients(table, horizons, headline, output_dir / f"{symbol}_horse_race.png")
+    print(f"Wrote {output_dir / f'{symbol}_horse_race.png'}")
+
+
+if __name__ == "__main__":
+    main()

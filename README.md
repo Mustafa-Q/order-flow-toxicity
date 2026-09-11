@@ -20,7 +20,7 @@ of ticks.
 | Phase | Description | Status |
 |---|---|---|
 | 1 | Feature construction: markout curve, then order-flow features + VPIN | **Done on real data** |
-| 2 | Horse-race regression: markout ~ features, isolate VPIN's contribution | not started |
+| 2 | Horse-race regression: markout ~ features, isolate VPIN's contribution | **Done: VPIN adds nothing** |
 | 3 | Simulated quoting policies (static / VPIN-gated / composite toxicity) | not started |
 | 4 | Policy comparison write-up | not started |
 | 5 | (stretch) Regime splits: open vs. midday, news vs. ordinary days | not started |
@@ -70,6 +70,32 @@ half-open and trailing, so no feature sees the trade itself or anything at
 its timestamp. Descriptive statistics are in
 [`markout/output/SPY_feature_summary.csv`](markout/output/SPY_feature_summary.csv);
 definitions are in [`markout/README.md`](markout/README.md#features).
+
+## Phase 2 result: VPIN adds nothing
+
+Pooled OLS of the 5-second markout on all 14 features, 1.76M trades, 19
+days, standard errors clustered by day. Directional features are aligned
+to the aggressor's direction and everything is standardized, so a
+coefficient is bps of markout per one standard deviation of the feature.
+
+![Horse-race coefficients](markout/output/SPY_horse_race.png)
+
+VPIN's coefficient is +0.004 bps per SD with a t-statistic of 0.9. Removing
+it changes R-squared by 0.0000 at 1 s, 5 s, and 60 s. Alone it explains
+nothing. The predictors that survive are book state rather than flow
+history: top-of-book depth imbalance on the side being hit (t of −6.4 at
+5 s, −10.2 at 1 s), then run length and 60-second realized volatility.
+Signed trade imbalance, the textbook toxicity signal, is zero here, alone
+or with controls.
+
+The model's R-squared is 0.46% at 5 s, which is normal at tick level and
+still sorts fills usefully: the best-looking decile of fills realizes
++0.17 bps and the worst −0.11 bps, a spread of about two ticks. That
+ordering, not VPIN, is what the Phase 3 quoting policies will use.
+
+Full tables and caveats (few clusters, cross-day identification of VPIN,
+in-sample sort, single-venue mechanics) are in
+[`markout/README.md`](markout/README.md#phase-2-result-the-horse-race).
 
 ### Read the caveats before quoting this
 
