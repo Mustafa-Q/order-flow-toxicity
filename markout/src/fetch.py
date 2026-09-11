@@ -32,6 +32,13 @@ def compute_trading_days(n_days: int, as_of: date | None = None) -> list[date]:
     return days
 
 
+def parse_as_of(value: str | None) -> date | None:
+    """Parse the --as-of CLI value (YYYY-MM-DD) into a date, or None if unset."""
+    if value is None:
+        return None
+    return date.fromisoformat(value)
+
+
 def get_databento_client():
     import databento as db
 
@@ -111,12 +118,10 @@ def fetch_day(
         start=day.isoformat(),
         end=(day + timedelta(days=1)).isoformat(),
     )
-    # Memory risk: a full day of consolidated SPY MBP-1 is tens of millions
-    # of records, and to_df() + from_pandas() each materialize a full
-    # in-memory copy. Worth revisiting with a streaming approach (e.g.
-    # writing DBN to disk and converting from there) before running against
-    # a real multi-day pull. Untested here -- no Databento API key exists
-    # in this project yet.
+    # Memory note: to_df() + from_pandas() each materialize a full in-memory
+    # copy. A single day of SPY on XNAS.ITCH is ~4M records (~50 MB parquet)
+    # and fits comfortably; a consolidated feed (EQUS.*) would be an order
+    # of magnitude larger and would want a streaming DBN-to-disk approach.
     df = pl.from_pandas(store.to_df())
     df.write_parquet(out_path)
     print(f"Wrote {len(df)} rows to {out_path}")
@@ -131,10 +136,21 @@ def main():
         default=None,
         help="Pull only the first N days (use 1 for the mandatory one-day validation pull)",
     )
+    parser.add_argument(
+        "--as-of",
+        type=str,
+        default=None,
+        help=(
+            "Anchor the n_trading_days window to end the trading day before this "
+            "date (YYYY-MM-DD). Defaults to today. Use it to extend an existing "
+            "cached window instead of starting a new one, e.g. --as-of 2026-07-21 "
+            "to fill in the 20 days ending 2026-07-20."
+        ),
+    )
     args = parser.parse_args()
 
     config = load_config()
-    days = compute_trading_days(config["n_trading_days"])
+    days = compute_trading_days(config["n_trading_days"], as_of=parse_as_of(args.as_of))
     if args.max_days is not None:
         days = days[: args.max_days]
 

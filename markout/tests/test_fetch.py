@@ -29,3 +29,19 @@ def test_resolve_dataset_respects_override():
     dataset = resolve_dataset(client, {"dataset_override": "XNYS.PILLAR"})
     assert dataset == "XNYS.PILLAR"
     client.metadata.list_datasets.assert_not_called()
+
+
+def test_parse_as_of_returns_date():
+    from src.fetch import parse_as_of
+
+    assert parse_as_of("2026-07-21") == date(2026, 7, 21)
+    assert parse_as_of(None) is None
+
+
+def test_compute_trading_days_anchored_window_contains_cached_days():
+    # anchoring the 20-day window at 2026-07-21 must produce a window whose
+    # last two days are the two real days already cached on disk
+    days = compute_trading_days(20, as_of=date(2026, 7, 21))
+    assert days[-1] == date(2026, 7, 20)
+    assert days[-2] == date(2026, 7, 17)
+    assert len(days) == 20

@@ -1,7 +1,16 @@
-markout/data/raw/
-markout/data/processed/
+# secrets
 markout/.env
+
+# market data (large, licensed) -- never commit
+markout/data/raw/
+markout/data/raw_stale/
+markout/data/processed/
+
+# python / tooling
 .venv/
 __pycache__/
 *.pyc
+.pytest_cache/
+
+# macOS
 .DS_Store
