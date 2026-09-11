@@ -94,6 +94,35 @@ def standardize(X: np.ndarray) -> np.ndarray:
 
 
 @dataclass
+class Scaler:
+    """Winsor bounds and z-score statistics fitted on one set of rows and
+    applied to another, so out-of-sample rows are scaled with in-sample
+    numbers."""
+
+    lo: np.ndarray
+    hi: np.ndarray
+    mean: np.ndarray
+    std: np.ndarray
+
+    def transform(self, X: np.ndarray) -> np.ndarray:
+        Xc = np.clip(np.asarray(X, dtype=np.float64), self.lo, self.hi)
+        std_safe = np.where(self.std > 0, self.std, 1.0)
+        Z = (Xc - self.mean) / std_safe
+        Z[:, self.std == 0] = 0.0
+        return Z
+
+
+def fit_scaler(X: np.ndarray, q: float) -> Scaler:
+    X = np.asarray(X, dtype=np.float64)
+    if q > 0:
+        lo, hi = np.quantile(X, q, axis=0), np.quantile(X, 1 - q, axis=0)
+    else:
+        lo, hi = np.full(X.shape[1], -np.inf), np.full(X.shape[1], np.inf)
+    W = np.clip(X, lo, hi)
+    return Scaler(lo=lo, hi=hi, mean=W.mean(axis=0), std=W.std(axis=0))
+
+
+@dataclass
 class Design:
     X: np.ndarray
     feature_names: list[str]
@@ -102,9 +131,10 @@ class Design:
     day_labels: list[str]
     n_total: int
     n_dropped: int
+    scaler: Scaler | None = None
 
 
-def build_design(features: pl.DataFrame, config: dict) -> Design:
+def build_design(features: pl.DataFrame, config: dict, scaler: Scaler | None = None) -> Design:
     horizons = config["regression_horizons_seconds"]
     target_cols = [f"markout_{h}s_bps" for h in horizons]
     names = feature_columns(features)
@@ -114,12 +144,13 @@ def build_design(features: pl.DataFrame, config: dict) -> Design:
     n_total, n_dropped = features.height, features.height - kept.height
 
     X = kept.select(names).to_numpy().astype(np.float64)
-    X = standardize(winsorize(X, config["winsor_quantile"]))
+    scaler = scaler or fit_scaler(X, config["winsor_quantile"])
+    X = scaler.transform(X)
     targets = {h: kept[f"markout_{h}s_bps"].to_numpy().astype(np.float64) for h in horizons}
     day_labels = sorted(kept["date"].unique().to_list())
     index = {d: i for i, d in enumerate(day_labels)}
     clusters = np.array([index[d] for d in kept["date"].to_list()], dtype=np.int64)
-    return Design(X, names, targets, clusters, day_labels, n_total, n_dropped)
+    return Design(X, names, targets, clusters, day_labels, n_total, n_dropped, scaler)
 
 
 def _subset(design: Design, names: list[str]) -> np.ndarray:

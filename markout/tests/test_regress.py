@@ -191,3 +191,35 @@ def test_regression_checks_pass_with_enough_days_and_flag_too_few():
     )
     assert not report5.all_blocking_passed
     assert any(c.name == "enough_clusters" and not c.passed for c in report5.checks)
+
+
+def test_scaler_fitted_on_train_carries_train_stats_to_test():
+    from src.regress import fit_scaler
+
+    rng = np.random.default_rng(3)
+    train = rng.normal(size=(500, 2))
+    test = rng.normal(loc=5.0, size=(500, 2))
+    sc = fit_scaler(train, 0.01)
+    assert sc.transform(train).mean(axis=0) == pytest.approx([0.0, 0.0], abs=1e-12)
+    z_test = sc.transform(test)
+    assert np.all(z_test.mean(axis=0) > 1.0)  # not re-centered on test
+    assert np.all(z_test.max(axis=0) <= (sc.hi - sc.mean) / sc.std + 1e-12)  # clipped at train bounds
+
+
+def test_build_design_accepts_prefitted_scaler():
+    from src.regress import build_design, fit_scaler
+
+    df = pl.DataFrame(
+        {
+            "date": ["d1", "d1", "d2", "d2"],
+            "aggressor_side": [1, -1, 1, -1],
+            "signed_imbalance_5": [0.1, 0.2, 0.3, 0.4],
+            "vpin": [0.1, 0.2, 0.3, 0.4],
+            "markout_5s_bps": [1.0, 2.0, 3.0, 4.0],
+        }
+    )
+    config = {"regression_horizons_seconds": [5], "winsor_quantile": 0.0}
+    sc = fit_scaler(np.array([[0.0, 0.0], [2.0, 2.0]]), 0.0)  # mean 1, std 1
+    d = build_design(df, config, scaler=sc)
+    assert d.scaler is sc
+    assert d.X[:, 1].tolist() == pytest.approx([-0.9, -0.8, -0.7, -0.6])
