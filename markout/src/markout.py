@@ -8,19 +8,47 @@ import polars as pl
 from src.config import load_config
 
 
+DEPTH_COLS = {"bid_sz_00": "quoted_bid_sz", "ask_sz_00": "quoted_ask_sz"}
+
+
+def build_mid_table(quotes: pl.DataFrame, trades: pl.DataFrame) -> pl.DataFrame:
+    """Union of the quotes-only stream and the trades' own embedded book
+    state, reduced to (ts_event, mid) and sorted. Every MBP-1 record,
+    including a trade, carries top-of-book state, so the trades are valid
+    book observations and omitting them starves asof lookups (see the
+    comment in compute_markouts). Shared by markout.py and features.py so
+    both use one definition of "the mid at time t"."""
+    return (
+        pl.concat(
+            [
+                quotes.select("ts_event", "bid_px_00", "ask_px_00"),
+                trades.select("ts_event", "bid_px_00", "ask_px_00"),
+            ]
+        )
+        .with_columns(((pl.col("bid_px_00") + pl.col("ask_px_00")) / 2).alias("mid"))
+        .select("ts_event", "mid")
+        .sort("ts_event")
+    )
+
+
 def compute_markouts(
     trades: pl.DataFrame, quotes: pl.DataFrame, horizons: list[float]
 ) -> pl.DataFrame:
     n = len(trades)
+    # Top-of-book sizes are carried through when present so features.py can
+    # compute depth imbalance from the same row-aligned file.
+    depth_present = [c for c in DEPTH_COLS if c in trades.columns]
     base = trades.with_columns(
         pl.int_range(0, n).alias("_trade_id"),
         pl.col("bid_px_00").alias("quoted_bid"),
         pl.col("ask_px_00").alias("quoted_ask"),
         (pl.col("ask_px_00") - pl.col("bid_px_00")).alias("quoted_spread"),
         ((pl.col("bid_px_00") + pl.col("ask_px_00")) / 2).alias("mid_at_fill"),
+        *[pl.col(c).alias(DEPTH_COLS[c]) for c in depth_present],
     ).select(
         "_trade_id", "ts_event", "price", "size", "aggressor_side",
         "quoted_bid", "quoted_ask", "quoted_spread", "mid_at_fill",
+        *[DEPTH_COLS[c] for c in depth_present],
     )
 
     # Build the mid-lookup table from the UNION of the quotes-only stream and
@@ -35,17 +63,7 @@ def compute_markouts(
     # p90 26s / max ~100s at h=0.1..120, producing an impossible decay curve
     # (1.00x half-spread at h=0 jumping to 6.86x at h=0.1, non-monotone
     # after). The union table is used for every h > 0 horizon below.
-    quotes_sorted = (
-        pl.concat(
-            [
-                quotes.select("ts_event", "bid_px_00", "ask_px_00"),
-                trades.select("ts_event", "bid_px_00", "ask_px_00"),
-            ]
-        )
-        .with_columns(((pl.col("bid_px_00") + pl.col("ask_px_00")) / 2).alias("mid"))
-        .select("ts_event", "mid")
-        .sort("ts_event")
-    )
+    quotes_sorted = build_mid_table(quotes, trades)
 
     result = base
     for h in horizons:

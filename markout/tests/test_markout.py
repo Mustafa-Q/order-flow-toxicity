@@ -262,3 +262,43 @@ def test_h5_asof_target_lands_on_another_trades_embedded_quote():
     trade_a = result.filter(pl.col("price") == 100.01)
     assert trade_a["markout_5s_dollars"].to_list() == pytest.approx([-0.025], abs=1e-9)
     assert trade_a["markout_5s_fracspread"].to_list() == pytest.approx([-5.0], abs=1e-9)
+
+
+def test_build_mid_table_unions_quotes_and_trades_sorted():
+    from src.markout import build_mid_table
+
+    trades = pl.DataFrame(
+        {"ts_event": [_ts(4)], "bid_px_00": [100.03], "ask_px_00": [100.04]}
+    ).with_columns(pl.col("ts_event").cast(pl.Datetime("ns", time_zone="America/New_York")))
+    quotes = pl.DataFrame(
+        {"ts_event": [_ts(10), _ts(0)], "bid_px_00": [100.10, 99.99], "ask_px_00": [100.11, 100.00]}
+    ).with_columns(pl.col("ts_event").cast(pl.Datetime("ns", time_zone="America/New_York")))
+
+    table = build_mid_table(quotes, trades)
+
+    assert table.columns == ["ts_event", "mid"]
+    assert table["ts_event"].to_list() == [_ts(0), _ts(4), _ts(10)]
+    assert table["mid"].to_list() == pytest.approx([99.995, 100.035, 100.105], abs=1e-9)
+
+
+def test_compute_markouts_carries_top_of_book_sizes_when_present():
+    trades = pl.DataFrame(
+        {
+            "ts_event": [_ts(0), _ts(10)],
+            "price": [100.01, 100.00],
+            "size": [100.0, 200.0],
+            "aggressor_side": [1, -1],
+            "bid_px_00": [100.00, 100.00],
+            "ask_px_00": [100.01, 100.01],
+            "bid_sz_00": [300, 500],
+            "ask_sz_00": [100, 700],
+        }
+    ).with_columns(pl.col("ts_event").cast(pl.Datetime("ns", time_zone="America/New_York")))
+    quotes = pl.DataFrame(
+        {"ts_event": [_ts(-1)], "bid_px_00": [100.00], "ask_px_00": [100.01]}
+    ).with_columns(pl.col("ts_event").cast(pl.Datetime("ns", time_zone="America/New_York")))
+
+    result = compute_markouts(trades, quotes, horizons=[0])
+
+    assert result["quoted_bid_sz"].to_list() == [300, 500]
+    assert result["quoted_ask_sz"].to_list() == [100, 700]
