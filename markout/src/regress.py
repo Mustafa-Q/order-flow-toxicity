@@ -5,6 +5,8 @@ from dataclasses import dataclass
 import numpy as np
 import polars as pl
 
+from src.features import feature_columns
+
 
 @dataclass
 class OlsResult:
@@ -52,3 +54,61 @@ def ols_cluster(X: np.ndarray, y: np.ndarray, clusters: np.ndarray, names: list[
     return OlsResult(
         names=["const", *names], coef=beta, se=se, t=beta / se, r2=r2, n=n, k=k, n_clusters=g
     )
+
+
+DIRECTIONAL_PREFIXES = ("signed_imbalance_", "ofi_", "momentum_")
+DIRECTIONAL_COLUMNS = ("depth_imbalance", "run_length")
+
+
+def align_direction(df: pl.DataFrame) -> pl.DataFrame:
+    """Multiply directional features by aggressor_side so positive means
+    'flow in the direction of the incoming trade', the adverse direction for
+    the passive maker. Non-directional features are untouched."""
+    cols = [c for c in df.columns if c.startswith(DIRECTIONAL_PREFIXES) or c in DIRECTIONAL_COLUMNS]
+    return df.with_columns([(pl.col(c) * pl.col("aggressor_side")).alias(c) for c in cols])
+
+
+def winsorize(X: np.ndarray, q: float) -> np.ndarray:
+    if q <= 0:
+        return X.copy()
+    lo = np.quantile(X, q, axis=0)
+    hi = np.quantile(X, 1 - q, axis=0)
+    return np.clip(X, lo, hi)
+
+
+def standardize(X: np.ndarray) -> np.ndarray:
+    mean = X.mean(axis=0)
+    std = X.std(axis=0)
+    std_safe = np.where(std > 0, std, 1.0)
+    Z = (X - mean) / std_safe
+    Z[:, std == 0] = 0.0
+    return Z
+
+
+@dataclass
+class Design:
+    X: np.ndarray
+    feature_names: list[str]
+    targets: dict[float, np.ndarray]
+    clusters: np.ndarray
+    day_labels: list[str]
+    n_total: int
+    n_dropped: int
+
+
+def build_design(features: pl.DataFrame, config: dict) -> Design:
+    horizons = config["regression_horizons_seconds"]
+    target_cols = [f"markout_{h}s_bps" for h in horizons]
+    names = feature_columns(features)
+    aligned = align_direction(features)
+    needed = names + target_cols
+    kept = aligned.drop_nulls(subset=needed)
+    n_total, n_dropped = features.height, features.height - kept.height
+
+    X = kept.select(names).to_numpy().astype(np.float64)
+    X = standardize(winsorize(X, config["winsor_quantile"]))
+    targets = {h: kept[f"markout_{h}s_bps"].to_numpy().astype(np.float64) for h in horizons}
+    day_labels = sorted(kept["date"].unique().to_list())
+    index = {d: i for i, d in enumerate(day_labels)}
+    clusters = np.array([index[d] for d in kept["date"].to_list()], dtype=np.int64)
+    return Design(X, names, targets, clusters, day_labels, n_total, n_dropped)
