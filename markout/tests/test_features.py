@@ -119,3 +119,38 @@ def test_ofi_features_window_difference_excludes_updates_at_t():
     # t=4:   C(4-)   = C(3) = 0 (the t=4 update is excluded)  =>    0
     # t=10:  C(10-)  = -80, C(5) = -80                         =>    0
     assert out["ofi_5"].to_list() == pytest.approx([-100.0, 0.0, 0.0])
+
+
+def test_momentum_uses_mid_at_t_minus_w_in_bps():
+    from src.features import momentum_features
+
+    mid_table = _frame({"ts_event": [_ts(0), _ts(3)], "mid": [100.0, 101.0]})
+    trades = _frame({"ts_event": [_ts(1), _ts(10)], "mid_at_fill": [100.5, 101.505]})
+    out = momentum_features(trades, mid_table, windows=[5])
+    # t=1: t-5 < first book state -> null
+    # t=10: mid at t=5 is 101.0 -> (101.505-101)/101 * 1e4 = 50
+    assert out["momentum_5"].to_list() == pytest.approx([None, 50.0])
+
+
+def test_point_in_time_features():
+    from src.features import point_in_time_features
+
+    trades = pl.DataFrame(
+        {
+            "quoted_spread": [0.01, 0.02],
+            "mid_at_fill": [100.005, 200.01],
+            "quoted_bid_sz": [100, 0],
+            "quoted_ask_sz": [300, 0],
+        }
+    )
+    out = point_in_time_features(trades)
+    assert out["spread_bps"].to_list() == pytest.approx([0.01 / 100.005 * 1e4, 0.02 / 200.01 * 1e4])
+    assert out["depth_imbalance"].to_list() == pytest.approx([-0.5, None])
+
+
+def test_run_length_is_signed_count_of_preceding_run():
+    from src.features import run_length
+
+    out = run_length(pl.Series("aggressor_side", [1, 1, -1, -1, -1, 1]))
+    assert out.name == "run_length"
+    assert out.to_list() == [0, 1, 2, -1, -2, -3]

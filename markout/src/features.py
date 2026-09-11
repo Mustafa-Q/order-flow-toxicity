@@ -110,3 +110,45 @@ def ofi_features(trades: pl.DataFrame, ofi_cum: pl.DataFrame, windows: list[floa
         col = (at_t - at_w).alias(f"ofi_{lbl}").to_frame()
         out = out.hstack(col) if out.width else col
     return out
+
+
+def momentum_features(trades: pl.DataFrame, mid_table: pl.DataFrame, windows: list[float]) -> pl.DataFrame:
+    """(mid at fill - mid at t - W) / mid at t - W, in bps. Null when no
+    book state exists at or before t - W."""
+    out = pl.DataFrame()
+    for w in windows:
+        lbl = window_label(w)
+        mid_w = asof_value(
+            trades,
+            pl.col("ts_event") - pl.duration(nanoseconds=int(round(w * NS_PER_SECOND))),
+            mid_table,
+            "mid",
+        )
+        col = ((trades["mid_at_fill"] - mid_w) / mid_w * 1e4).alias(f"momentum_{lbl}").to_frame()
+        out = out.hstack(col) if out.width else col
+    return out
+
+
+def point_in_time_features(trades: pl.DataFrame) -> pl.DataFrame:
+    """Quoted spread in bps of mid, and top-of-book depth imbalance from the
+    trade record's own embedded book (the state the fill executed against).
+    Depth imbalance is null when both sizes are zero."""
+    bid_sz = pl.col("quoted_bid_sz").cast(pl.Float64)
+    ask_sz = pl.col("quoted_ask_sz").cast(pl.Float64)
+    return trades.select(
+        (pl.col("quoted_spread") / pl.col("mid_at_fill") * 1e4).alias("spread_bps"),
+        pl.when((bid_sz + ask_sz) > 0)
+        .then((bid_sz - ask_sz) / (bid_sz + ask_sz))
+        .otherwise(None)
+        .alias("depth_imbalance"),
+    )
+
+
+def run_length(aggressor_side: pl.Series) -> pl.Series:
+    """Signed length of the run of same-side trades ending at the previous
+    trade: +k if the previous k trades were buys (and the one before was
+    not), -k for sells. First trade gets 0."""
+    df = pl.DataFrame({"s": aggressor_side})
+    pos = df.select(pl.col("s").cum_count().over(pl.col("s").rle_id()).alias("pos"))["pos"]
+    prev = (pos.shift(1) * aggressor_side.shift(1)).fill_null(0).cast(pl.Int64)
+    return prev.alias("run_length")
