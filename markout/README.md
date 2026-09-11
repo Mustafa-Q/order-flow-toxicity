@@ -33,6 +33,7 @@ uv run python -m src.features             # per-trade order-flow features + VPIN
 uv run python -m src.aggregate
 uv run python -m src.plot                 # validation report, then the chart
 uv run python -m src.regress              # Phase 2 horse-race regression
+uv run python -m src.policy               # Phase 3 quoting-policy comparison
 ```
 
 `fetch.py` caches one parquet per day in `data/raw/` and never re-downloads a
@@ -64,6 +65,7 @@ uv run python -m src.plot --symbol SYNTH
 | `src/markout.py` | The markout computation, all three units (dollars, bps, fraction of half-spread), horizons 0 to 120 s. Carries top-of-book sizes through for the features stage. |
 | `src/features.py` | Trailing-window order-flow features and VPIN appended to every markout row, plus a descriptive summary and four sanity checks. See "Features" below. |
 | `src/regress.py` | Phase 2: pooled OLS of markouts on the features with day-clustered SEs, VPIN's marginal value, leave-one-out ranking, decile sort, coefficient chart. See "Phase 2 result" below. |
+| `src/policy.py` | Phase 3: static, VPIN-gated, composite, and random participation policies evaluated out of sample with walk-forward thresholds; comparison table, daily P&L, cumulative P&L chart. See "Phase 3 result" below. |
 | `src/aggregate.py` | Daily size- and equal-weighted means, standard errors clustered on daily means, size-quintile cut. |
 | `src/validate.py` | Six checks: `X(0)` = +half spread, buy share 45–55%, mean spread ≤ $0.02, daily trade-count stability, no NaNs, monotone-ish decay (advisory). |
 | `src/plot.py` | Two-panel chart (bps and fraction of half-spread, log-x, ±2 SE bands), gated on the blocking checks. |
@@ -175,6 +177,67 @@ regime change is. The depth-imbalance result is at least partly the
 single-venue mechanical effect: a thin queue on the hit side is exactly the
 state in which one fill empties the Nasdaq level and moves the Nasdaq mid.
 
+## Phase 3 result: does reacting to toxicity help?
+
+Four participation policies for a passive maker, evaluated out of sample.
+The Phase 2 model is fitted on the first 10 days; the last 9 days are the
+test. A policy decides per trade whether to take the passive side for up to
+100 shares; each fill is held H seconds and closed at the mid, so its P&L
+is its H-second markout. Gated policies target a 20% sit-out rate with
+thresholds recalibrated each test day from all prior days (a fixed
+train-period VPIN cutoff transferred badly: VPIN's level drifts week to
+week and the policy sat out 2.7% instead of 20%). The random policy sits
+out 20% by coin flip and is the null.
+
+![Cumulative out-of-sample P&L](output/SPY_policy_pnl.png)
+
+Test period 2026-07-08 to 2026-07-20, 805,063 trades, $27.8B notional for
+the static policy.
+
+| Policy | Fill rate | Gross P&L, hold 60 s | Max drawdown | Mean abs inventory | vs. static, daily t | Gross P&L, hold 5 s | vs. static, daily t |
+|---|---|---|---|---|---|---|---|
+| static | 100% | −$81.6k | $105k | 3,469 sh | | −$30.6k | |
+| vpin_gated | 88% | −$13.6k | $81k | 2,904 sh | +1.4 | −$14.1k | +1.3 |
+| composite | 80% | −$96.0k | $117k | 3,878 sh | −0.5 | **+$4.8k** | **+2.6** |
+| random | 80% | −$67.0k | $88k | 2,791 sh | +0.8 | −$24.1k | +1.2 |
+
+Tables: [`output/SPY_policy_comparison.csv`](output/SPY_policy_comparison.csv),
+[`output/SPY_policy_daily_pnl.csv`](output/SPY_policy_daily_pnl.csv).
+
+**Reading.** Passive participation in every SPY trade on this book loses
+money at every hold: the spread captured ($359k) is smaller than the
+adverse move. The composite policy, which stands down on the 20% of
+trades the Phase 2 model flags as most toxic, is the only policy that is
+profitable, and only at the 5-second hold that matches its signal
+horizon: +$4.8k against static's −$30.6k, better than static on 8 of 9
+days, paired t = 2.6. At a 60-second hold the same policy is no better
+than sitting out at random, because the signal it uses (mostly depth on
+the hit side) predicts the next few seconds, not the next minute. The
+VPIN policy's improvement at 60 s (+$68k) comes almost entirely from two
+days, 2026-07-16 and 2026-07-17, on which VPIN's daily level was high and
+the book lost heavily; across the 9 days that is t = 1.4, not
+distinguishable from luck, and it is a day-selection effect rather than a
+trade-selection one, since VPIN barely moves within a day.
+
+**Desk-level answer.** Reacting to estimated toxicity helps only when the
+signal's horizon matches the holding horizon. A short-horizon book-state
+signal (depth imbalance on the side being hit, run length, recent
+volatility) turns a losing passive book into a roughly break-even one by
+passing on one trade in five, and does it consistently day to day. VPIN
+does not select trades; at best it selects days, and in this sample two
+days carry the whole effect. Widening or standing down on VPIN alone
+would have cost fill rate on most days for a benefit that cannot be
+separated from noise.
+
+**Caveats.** Nine test days. No queue model: every trade we participate in
+is assumed to fill, which flatters every policy equally but hides that a
+real maker is filled on the worse subset. No hedging, fees, or rebates.
+The 100-share cap makes inventory a queue-of-fills count, not a real
+position. Single-venue book: the depth effect the composite policy trades
+on is partly Nasdaq-level depletion that a consolidated quote would soften.
+P&L in bps of notional is about 0.01 either way; the sample is a one-tick
+book and the numbers are small by construction.
+
 ## What the real data showed
 
 Nineteen trading days of `XNAS.ITCH` are on disk (2026-06-23 to
@@ -232,6 +295,7 @@ Aggressor-side coverage:
       length, VPIN, appended row for row to the per-trade markout table.
 - [x] Phase 2 horse-race regression: markout ~ features, VPIN's marginal
       contribution isolated. VPIN adds nothing; depth imbalance dominates.
-- [ ] Phase 3 simulated quoting policies: static, VPIN-gated, and
-      composite-toxicity, compared on spread captured, markouts, fill rate,
-      P&L.
+- [x] Phase 3 simulated quoting policies, out of sample: the composite
+      policy is the only profitable one and only at its own 5 s horizon
+      (t = 2.6); VPIN gating is a two-day effect (t = 1.4).
+- [ ] Phase 4 write-up; Phase 5 (stretch) regime splits.

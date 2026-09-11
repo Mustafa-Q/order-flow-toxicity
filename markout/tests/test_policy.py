@@ -158,3 +158,45 @@ def test_comparison_prefers_perfect_composite_signal_over_static_and_random():
     assert daily.columns == ["date", "static", "vpin_gated", "composite", "random"]
     assert daily.height == 4
     assert daily["static"].sum() == pytest.approx(at60["static"]["gross_pnl_usd"])
+
+
+def test_policy_checks_catch_overlap_and_off_target_sit_out():
+    from src.policy import run_policy_checks
+
+    good = pl.DataFrame(
+        {
+            "policy": ["static", "vpin_gated", "composite", "random"],
+            "hold_seconds": [60.0] * 4,
+            "fill_rate": [1.0, 0.82, 0.78, 0.80],
+            "gross_pnl_usd": [1.0, 2.0, 3.0, 4.0],
+        }
+    )
+    ok = run_policy_checks(["a", "b"], ["c"], ["a", "b", "c"], good, 0.2)
+    assert ok.all_blocking_passed
+
+    overlap = run_policy_checks(["a", "b"], ["b", "c"], ["a", "b", "c"], good, 0.2)
+    assert any(c.name == "train_test_disjoint" and not c.passed for c in overlap.checks)
+
+    off = good.with_columns(pl.Series("fill_rate", [1.0, 0.6, 0.78, 0.80]))
+    bad = run_policy_checks(["a", "b"], ["c"], ["a", "b", "c"], off, 0.2)
+    assert any(c.name == "sit_out_near_target" and not c.passed for c in bad.checks)
+
+    nan = good.with_columns(pl.Series("gross_pnl_usd", [1.0, float("nan"), 3.0, 4.0]))
+    bad2 = run_policy_checks(["a", "b"], ["c"], ["a", "b", "c"], nan, 0.2)
+    assert any(c.name == "no_nans" and not c.passed for c in bad2.checks)
+
+
+def test_walk_forward_thresholds_use_only_prior_days():
+    from src.policy import walk_forward_thresholds
+
+    dates = np.array(["d1"] * 4 + ["d2"] * 4 + ["d3"] * 4)
+    vpin = np.array([1, 2, 3, 4, 10, 20, 30, 40, 0, 0, 0, 0], dtype=float)
+    pred = -vpin
+    th = walk_forward_thresholds(dates, vpin, pred, test_days=["d2", "d3"], sit_out_rate=0.25)
+    # d2 rows: cut from d1 only -> vpin q75 of [1,2,3,4] = 3.25, composite q25 of [-4..-1] = -3.25
+    # d3 rows: cut from d1+d2 -> vpin q75 of [1,2,3,4,10,20,30,40], composite q25 of the negatives
+    assert th.vpin_cut[:4].tolist() == pytest.approx([3.25] * 4)
+    assert th.composite_cut[:4].tolist() == pytest.approx([-3.25] * 4)
+    assert th.vpin_cut[4:].tolist() == pytest.approx([np.quantile([1, 2, 3, 4, 10, 20, 30, 40], 0.75)] * 4)
+    assert th.composite_cut[4:].tolist() == pytest.approx([np.quantile(-np.array([1, 2, 3, 4, 10, 20, 30, 40.0]), 0.25)] * 4)
+    assert len(th.vpin_cut) == 8 and th.sit_out_rate == 0.25

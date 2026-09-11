@@ -40,12 +40,19 @@ the realistic case of a short-horizon signal and a longer hold.
 
 `split_days(day_labels, train_share)`: train is the first
 `ceil(n × train_share)` days in date order, test the rest. On train only:
+fit `Scaler` (winsor bounds, mean, std) and the full-model OLS at the
+regression headline horizon, reusing `regress.py`. The model is fixed for
+the whole test period.
 
-1. Fit `Scaler` (winsor bounds, mean, std) and the full-model OLS at the
-   regression headline horizon, reusing `regress.py`.
-2. `vpin_cut` = train quantile `1 − sit_out_rate` of `vpin`.
-3. `composite_cut` = train quantile `sit_out_rate` of the model's
-   prediction on train rows.
+Thresholds walk forward. For each test day, `vpin_cut` is the
+`1 − sit_out_rate` quantile of VPIN and `composite_cut` the `sit_out_rate`
+quantile of the model's prediction, both over every row dated strictly
+before that day (train days plus earlier test days). The first version of
+this spec fixed both cuts on the train period; on real data VPIN's level
+drifted between the halves and the VPIN policy sat out 2.7% of test trades
+instead of 20%, which made the comparison unfair. Daily recalibration from
+prior history is how either signal would actually be run and keeps
+realized sit-out rates comparable without using any test-day level.
 
 ## Policies (evaluated on test rows)
 
@@ -56,7 +63,8 @@ the realistic case of a short-horizon signal and a longer hold.
 | `composite` | predicted 5 s markout `>= composite_cut` |
 | `random` | seeded uniform draw `>= sit_out_rate` |
 
-Realized test sit-out rates are reported; they need not equal the target.
+Realized test sit-out rates are reported; they need not equal the target
+exactly, and the check below allows 10 points of slack.
 
 ## Metrics per policy and H (`{SYM}_policy_comparison.csv`)
 

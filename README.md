@@ -21,7 +21,7 @@ of ticks.
 |---|---|---|
 | 1 | Feature construction: markout curve, then order-flow features + VPIN | **Done on real data** |
 | 2 | Horse-race regression: markout ~ features, isolate VPIN's contribution | **Done: VPIN adds nothing** |
-| 3 | Simulated quoting policies (static / VPIN-gated / composite toxicity) | not started |
+| 3 | Simulated quoting policies (static / VPIN-gated / composite toxicity) | **Done: composite helps at 5 s, VPIN is a two-day effect** |
 | 4 | Policy comparison write-up | not started |
 | 5 | (stretch) Regime splits: open vs. midday, news vs. ordinary days | not started |
 
@@ -96,6 +96,35 @@ ordering, not VPIN, is what the Phase 3 quoting policies will use.
 Full tables and caveats (few clusters, cross-day identification of VPIN,
 in-sample sort, single-venue mechanics) are in
 [`markout/README.md`](markout/README.md#phase-2-result-the-horse-race).
+
+## Phase 3 result: reacting to toxicity helps only at the signal's own horizon
+
+Four participation policies for a passive maker, evaluated on the last 9
+days after fitting on the first 10. Each policy decides per trade whether
+to take the passive side; gated policies sit out about 20% of trades with
+thresholds recalibrated daily from prior history; fills are held H seconds
+and closed at the mid.
+
+![Cumulative out-of-sample P&L](markout/output/SPY_policy_pnl.png)
+
+| Policy, hold 5 s | Fill rate | Gross P&L | vs. static, paired t |
+|---|---|---|---|
+| static | 100% | −$30.6k | |
+| vpin_gated | 88% | −$14.1k | 1.3 |
+| composite (Phase 2 model) | 80% | **+$4.8k** | **2.6** |
+| random 20% sit-out | 80% | −$24.1k | 1.2 |
+
+The desk-level answer: a short-horizon book-state signal (depth on the side
+being hit, run length, recent volatility) turns a losing passive book into
+a break-even one by passing on one trade in five, and does it on 8 of 9
+days. It stops helping at a 60-second hold, because it predicts the next
+few seconds, not the next minute. VPIN does not select trades; it barely
+moves within a day. Its apparent 60-second benefit comes from standing
+down on two bad days, which nine days cannot separate from luck.
+
+Full table, the 60-second results, and caveats (nine test days, no queue
+model, no hedging, single-venue book) are in
+[`markout/README.md`](markout/README.md#phase-3-result-does-reacting-to-toxicity-help).
 
 ### Read the caveats before quoting this
 
