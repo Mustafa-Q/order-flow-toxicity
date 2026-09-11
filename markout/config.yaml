@@ -15,3 +15,6 @@ output_dir: "output"
 feature_windows_seconds: [5, 60]
 vpin_buckets_per_day: 50
 vpin_window_buckets: 50
+regression_horizons_seconds: [5, 1, 60]
+winsor_quantile: 0.001
+n_deciles: 10
