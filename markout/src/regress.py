@@ -112,3 +112,115 @@ def build_design(features: pl.DataFrame, config: dict) -> Design:
     index = {d: i for i, d in enumerate(day_labels)}
     clusters = np.array([index[d] for d in kept["date"].to_list()], dtype=np.int64)
     return Design(X, names, targets, clusters, day_labels, n_total, n_dropped)
+
+
+def _subset(design: Design, names: list[str]) -> np.ndarray:
+    idx = [design.feature_names.index(n) for n in names]
+    return design.X[:, idx]
+
+
+def run_model_set(design: Design, horizon: float) -> dict[str, OlsResult]:
+    y = design.targets[horizon]
+    names = design.feature_names
+
+    def fit(subset: list[str]) -> OlsResult:
+        return ols_cluster(_subset(design, subset), y, design.clusters, subset)
+
+    results = {"full": fit(names)}
+    results["no_vpin"] = fit([n for n in names if n != "vpin"])
+    results["vpin_only"] = fit(["vpin"])
+    for n in names:
+        results[f"drop_{n}"] = fit([m for m in names if m != n])
+    return results
+
+
+def horse_race_table(results_by_h: dict[float, dict[str, OlsResult]], headline: float) -> pl.DataFrame:
+    horizons = list(results_by_h)
+    head = results_by_h[headline]["full"]
+    features = [n for n in head.names if n != "const"]
+    order = sorted(features, key=lambda n: -abs(head[n][2]))
+
+    rows = []
+    for n in order + ["const"]:
+        row = {"feature": n}
+        for h in horizons:
+            c, s, t = results_by_h[h]["full"][n]
+            row.update({f"coef_{h}": c, f"se_{h}": s, f"t_{h}": t})
+        rows.append(row)
+    summary_rows = [
+        ("r2", lambda r: r.r2),
+        ("n_obs", lambda r: float(r.n)),
+        ("n_days", lambda r: float(r.n_clusters)),
+    ]
+    for label, getter in summary_rows:
+        row = {"feature": label}
+        for h in horizons:
+            row.update({f"coef_{h}": getter(results_by_h[h]["full"]), f"se_{h}": None, f"t_{h}": None})
+        rows.append(row)
+    return pl.DataFrame(rows)
+
+
+def vpin_marginal_table(results_by_h: dict[float, dict[str, OlsResult]]) -> pl.DataFrame:
+    rows = []
+    for h, res in results_by_h.items():
+        c, _, t = res["full"]["vpin"]
+        rows.append(
+            {
+                "horizon": float(h),
+                "r2_full": res["full"].r2,
+                "r2_no_vpin": res["no_vpin"].r2,
+                "delta_r2": res["full"].r2 - res["no_vpin"].r2,
+                "vpin_coef": c,
+                "vpin_t": t,
+                "r2_vpin_only": res["vpin_only"].r2,
+            }
+        )
+    return pl.DataFrame(rows)
+
+
+def leave_one_out_table(results_by_h: dict[float, dict[str, OlsResult]], headline: float) -> pl.DataFrame:
+    horizons = list(results_by_h)
+    features = [n for n in results_by_h[headline]["full"].names if n != "const"]
+    rows = []
+    for n in features:
+        row = {"feature": n}
+        for h in horizons:
+            row[f"delta_r2_{h}"] = results_by_h[h]["full"].r2 - results_by_h[h][f"drop_{n}"].r2
+        rows.append(row)
+    return pl.DataFrame(rows).sort(f"delta_r2_{headline}", descending=True)
+
+
+def decile_sort_table(
+    design: Design, results_by_h: dict[float, dict[str, OlsResult]], headline: float, n_deciles: int
+) -> pl.DataFrame:
+    """In-sample sort of trades by the full model's fitted markout at the
+    headline horizon. Decile 1 is the most negative prediction (most
+    toxic-looking fills)."""
+    full = results_by_h[headline]["full"]
+    fitted = full.coef[0] + design.X @ full.coef[1:]
+    n = len(fitted)
+    rank = np.empty(n, dtype=np.int64)
+    rank[np.argsort(fitted, kind="stable")] = np.arange(n)
+    decile = (rank * n_deciles) // n + 1
+
+    others = [h for h in results_by_h if h != headline]
+    rows = []
+    for d in range(1, n_deciles + 1):
+        m = decile == d
+        row = {
+            "decile": str(d),
+            "n_trades": int(m.sum()),
+            "predicted_mean_bps": float(fitted[m].mean()),
+            "realized_mean_bps": float(design.targets[headline][m].mean()),
+        }
+        for h in others:
+            row[f"realized_mean_bps_{h}"] = float(design.targets[h][m].mean())
+        rows.append(row)
+    top, bottom = rows[-1], rows[0]
+    spread = {"decile": "spread", "n_trades": None}
+    for key in rows[0]:
+        if key in ("decile", "n_trades"):
+            continue
+        spread[key] = top[key] - bottom[key]
+    rows.append(spread)
+    return pl.DataFrame(rows)

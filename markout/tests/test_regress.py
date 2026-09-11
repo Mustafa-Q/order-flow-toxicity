@@ -104,3 +104,69 @@ def test_build_design_drops_nulls_and_returns_targets():
     assert d.targets[1].tolist() == [0.5, 0.7, 0.8]
     assert d.clusters.tolist() == [0, 1, 1]
     assert d.day_labels == ["d1", "d2"]
+
+
+def _synthetic_design(seed=1, n=4000):
+    from src.regress import Design
+
+    rng = np.random.default_rng(seed)
+    names = ["signed_imbalance_5", "ofi_5", "intensity_5", "vpin"]
+    X = rng.normal(size=(n, 4))
+    days = np.repeat(np.arange(5), n // 5)
+    y5 = -2.0 * X[:, 0] + 3.0 * X[:, 1] + rng.normal(size=n)
+    y1 = 0.5 * y5
+    return Design(X, names, {5: y5, 1: y1}, days, [f"d{i}" for i in range(5)], n, 0)
+
+
+def test_run_model_set_recovers_synthetic_coefficients_and_ranks_features():
+    from src.regress import leave_one_out_table, run_model_set, vpin_marginal_table
+
+    d = _synthetic_design()
+    res = {5: run_model_set(d, 5), 1: run_model_set(d, 1)}
+    full = res[5]["full"]
+    assert set(res[5]) == {
+        "full", "no_vpin", "vpin_only",
+        "drop_signed_imbalance_5", "drop_ofi_5", "drop_intensity_5", "drop_vpin",
+    }
+    assert full["signed_imbalance_5"][0] == pytest.approx(-2.0, abs=0.1)
+    assert full["ofi_5"][0] == pytest.approx(3.0, abs=0.1)
+    assert abs(full["signed_imbalance_5"][2]) > 5 and abs(full["ofi_5"][2]) > 5
+    assert res[5]["no_vpin"].names == ["const", "signed_imbalance_5", "ofi_5", "intensity_5"]
+    assert res[5]["vpin_only"].names == ["const", "vpin"]
+
+    loo = leave_one_out_table(res, headline=5)
+    assert loo.columns == ["feature", "delta_r2_5", "delta_r2_1"]
+    assert loo["feature"][0] == "ofi_5" and loo["feature"][1] == "signed_imbalance_5"
+    assert loo.filter(pl.col("feature") == "vpin")["delta_r2_5"][0] == pytest.approx(0.0, abs=0.005)
+
+    vm = vpin_marginal_table(res)
+    assert vm.columns == ["horizon", "r2_full", "r2_no_vpin", "delta_r2", "vpin_coef", "vpin_t", "r2_vpin_only"]
+    assert vm["delta_r2"][0] == pytest.approx(0.0, abs=0.005)
+
+
+def test_horse_race_table_layout():
+    from src.regress import horse_race_table, run_model_set
+
+    d = _synthetic_design()
+    res = {5: run_model_set(d, 5), 1: run_model_set(d, 1)}
+    t = horse_race_table(res, headline=5)
+    assert t.columns == ["feature", "coef_5", "se_5", "t_5", "coef_1", "se_1", "t_1"]
+    feats = t["feature"].to_list()
+    assert feats[-4:] == ["const", "r2", "n_obs", "n_days"]
+    assert feats[0] == "ofi_5"  # largest |t| first
+    tail = t.filter(pl.col("feature") == "n_days")
+    assert tail["coef_5"][0] == 5 and tail["se_5"][0] is None
+
+
+def test_decile_sort_table_means_and_spread():
+    from src.regress import decile_sort_table, run_model_set
+
+    d = _synthetic_design()
+    res = {5: run_model_set(d, 5), 1: run_model_set(d, 1)}
+    t = decile_sort_table(d, res, headline=5, n_deciles=10)
+    assert t.columns == ["decile", "n_trades", "predicted_mean_bps", "realized_mean_bps", "realized_mean_bps_1"]
+    assert t["decile"].to_list()[:10] == [str(i) for i in range(1, 11)] and t["decile"][10] == "spread"
+    assert t["n_trades"][:10].sum() == d.X.shape[0]
+    assert t["predicted_mean_bps"][0] < t["predicted_mean_bps"][9]
+    assert t["realized_mean_bps"][0] < t["realized_mean_bps"][9]
+    assert t["realized_mean_bps"][10] == pytest.approx(t["realized_mean_bps"][9] - t["realized_mean_bps"][0])
