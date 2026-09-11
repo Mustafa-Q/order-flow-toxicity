@@ -82,3 +82,69 @@ def paired_daily_stats(policy_daily: np.ndarray, baseline_daily: np.ndarray) -> 
         return mean, float("nan")
     se = d.std(ddof=1) / math.sqrt(n)
     return mean, (mean / se if se > 0 else float("nan"))
+
+
+def evaluate_policy(
+    test: pl.DataFrame, mask: np.ndarray, hold_seconds: float, max_fill_shares: int
+) -> dict:
+    size = test["size"].to_numpy().astype(np.float64)
+    side = test["aggressor_side"].to_numpy().astype(np.float64)
+    mid = test["mid_at_fill"].to_numpy().astype(np.float64)
+    fill = fill_shares(size, mask, max_fill_shares)
+    pnl = test[f"markout_{hold_seconds}s_dollars"].to_numpy() * fill
+    bps = test[f"markout_{hold_seconds}s_bps"].to_numpy()
+    spread = test["markout_0s_dollars"].to_numpy() * fill
+
+    shares = float(fill.sum())
+    notional = float((fill * mid).sum())
+    gross = float(pnl.sum())
+    inv = inventory_path(test["ts_event"], -side * fill, hold_seconds)
+    mean_abs_inv = float(np.abs(inv).mean())
+    inv_notional = mean_abs_inv * float(mid.mean())
+    return {
+        "hold_seconds": float(hold_seconds),
+        "n_trades": int(len(mask)),
+        "n_fills": int(mask.sum()),
+        "fill_rate": float(mask.mean()),
+        "shares": shares,
+        "notional_usd": notional,
+        "spread_captured_usd": float(spread.sum()),
+        "gross_pnl_usd": gross,
+        "pnl_bps_of_notional": gross / notional * 1e4 if notional > 0 else float("nan"),
+        "mean_markout_bps_sw": float((bps * fill).sum() / shares) if shares > 0 else float("nan"),
+        "max_drawdown_usd": max_drawdown(np.cumsum(pnl)),
+        "mean_abs_inventory_shares": mean_abs_inv,
+        "max_abs_inventory_shares": float(np.abs(inv).max()) if len(inv) else 0.0,
+        "pnl_per_inventory_usd": gross / inv_notional if inv_notional > 0 else float("nan"),
+    }
+
+
+def daily_pnl_table(
+    test: pl.DataFrame, masks: dict[str, np.ndarray], hold_seconds: float, max_fill_shares: int
+) -> pl.DataFrame:
+    size = test["size"].to_numpy().astype(np.float64)
+    per_share = test[f"markout_{hold_seconds}s_dollars"].to_numpy()
+    cols = {"date": test["date"]}
+    for name, mask in masks.items():
+        cols[name] = pl.Series(name, per_share * fill_shares(size, mask, max_fill_shares))
+    return pl.DataFrame(cols).group_by("date").agg([pl.col(p).sum() for p in masks]).sort("date")
+
+
+def comparison_table(
+    test: pl.DataFrame, masks: dict[str, np.ndarray], holds: list[float], max_fill_shares: int
+) -> pl.DataFrame:
+    rows = []
+    for h in holds:
+        daily = daily_pnl_table(test, masks, h, max_fill_shares)
+        base = daily["static"].to_numpy()
+        for name, mask in masks.items():
+            row = {"policy": name, **evaluate_policy(test, mask, h, max_fill_shares)}
+            if name == "static":
+                row["daily_pnl_vs_static_mean_usd"] = None
+                row["daily_pnl_vs_static_t"] = None
+            else:
+                mean, t = paired_daily_stats(daily[name].to_numpy(), base)
+                row["daily_pnl_vs_static_mean_usd"] = mean
+                row["daily_pnl_vs_static_t"] = t
+            rows.append(row)
+    return pl.DataFrame(rows)

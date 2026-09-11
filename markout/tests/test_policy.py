@@ -90,3 +90,71 @@ def test_paired_daily_stats():
     mean, t = paired_daily_stats(policy, base)  # diffs 2,3,1,2 -> mean 2
     assert mean == pytest.approx(2.0)
     assert t == pytest.approx(2.0 / (np.std([2, 3, 1, 2], ddof=1) / 2))
+
+
+def _synthetic_test_frame(n=4000, seed=5):
+    rng = np.random.default_rng(seed)
+    per_day = n // 4
+    days = np.repeat([f"2026-07-{d:02d}" for d in (13, 14, 15, 16)], per_day)
+    seconds = np.tile(np.sort(rng.uniform(0, 6 * 3600, per_day)), 4) + np.repeat(
+        np.arange(4) * 86400, per_day
+    )
+    side = rng.choice([1, -1], size=n)
+    mid = 740.0 + rng.normal(size=n).cumsum() * 0.001
+    m60 = rng.normal(scale=0.02, size=n) - 0.005  # dollars per share, mostly adverse
+    m5 = 0.5 * m60 + rng.normal(scale=0.005, size=n)
+    m0 = np.full(n, 0.005)
+    frame = pl.DataFrame(
+        {
+            "ts_event": _ts_series(seconds),
+            "date": days,
+            "size": rng.integers(1, 400, size=n),
+            "aggressor_side": side,
+            "mid_at_fill": mid,
+            "vpin": rng.uniform(0.1, 0.2, size=n),
+            "markout_0s_dollars": m0,
+            "markout_60s_dollars": m60,
+            "markout_60s_bps": m60 / mid * 1e4,
+            "markout_5s_dollars": m5,
+            "markout_5s_bps": m5 / mid * 1e4,
+        }
+    )
+    return frame, m5
+
+
+def test_evaluate_policy_static_metrics_are_internally_consistent():
+    from src.policy import evaluate_policy
+
+    test, _ = _synthetic_test_frame()
+    m = evaluate_policy(test, np.ones(test.height, dtype=bool), hold_seconds=60, max_fill_shares=100)
+    fill = np.minimum(test["size"].to_numpy(), 100)
+    assert m["n_fills"] == test.height and m["fill_rate"] == 1.0
+    assert m["shares"] == pytest.approx(fill.sum())
+    assert m["gross_pnl_usd"] == pytest.approx((test["markout_60s_dollars"].to_numpy() * fill).sum())
+    assert m["spread_captured_usd"] == pytest.approx((0.005 * fill).sum())
+    assert m["pnl_bps_of_notional"] == pytest.approx(m["gross_pnl_usd"] / m["notional_usd"] * 1e4)
+    assert m["max_drawdown_usd"] >= 0 and m["mean_abs_inventory_shares"] > 0
+
+
+def test_comparison_prefers_perfect_composite_signal_over_static_and_random():
+    from src.policy import comparison_table, daily_pnl_table, fit_thresholds, participation_masks
+
+    test, m5 = _synthetic_test_frame()
+    rng = np.random.default_rng(9)
+    predicted = m5 + rng.normal(scale=0.001, size=test.height)  # nearly perfect 5 s signal
+    th = fit_thresholds(test["vpin"].to_numpy(), predicted, 0.2)
+    masks = participation_masks(test["vpin"].to_numpy(), predicted, th, seed=0)
+
+    table = comparison_table(test, masks, holds=[60, 5], max_fill_shares=100)
+    assert table.columns[:3] == ["policy", "hold_seconds", "n_trades"]
+    at60 = {r["policy"]: r for r in table.filter(pl.col("hold_seconds") == 60).iter_rows(named=True)}
+    assert at60["static"]["fill_rate"] == 1.0
+    assert at60["composite"]["gross_pnl_usd"] > at60["static"]["gross_pnl_usd"]
+    assert at60["composite"]["gross_pnl_usd"] > at60["random"]["gross_pnl_usd"]
+    assert at60["static"]["daily_pnl_vs_static_t"] is None
+    assert at60["composite"]["daily_pnl_vs_static_mean_usd"] > 0
+
+    daily = daily_pnl_table(test, masks, hold_seconds=60, max_fill_shares=100)
+    assert daily.columns == ["date", "static", "vpin_gated", "composite", "random"]
+    assert daily.height == 4
+    assert daily["static"].sum() == pytest.approx(at60["static"]["gross_pnl_usd"])
