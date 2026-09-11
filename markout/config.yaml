@@ -18,3 +18,8 @@ vpin_window_buckets: 50
 regression_horizons_seconds: [5, 1, 60]
 winsor_quantile: 0.001
 n_deciles: 10
+policy_train_share: 0.5
+policy_sit_out_rate: 0.2
+policy_hold_seconds: [60, 5]
+max_fill_shares: 100
+policy_random_seed: 0
