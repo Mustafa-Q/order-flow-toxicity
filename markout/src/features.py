@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import argparse
 import math
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import polars as pl
+
+from src.config import load_config
+from src.markout import build_mid_table
+from src.validate import CheckResult, ValidationReport, print_report
 
 NS_PER_SECOND = 1_000_000_000
 
@@ -225,3 +231,183 @@ def vpin_features(
         completed_imbalances=imbalances,
     )
     return vpin, new_state
+
+
+WINDOWED_PREFIXES = ("signed_imbalance_", "ofi_", "intensity_", "momentum_", "realized_vol_")
+POINT_COLUMNS = ("spread_bps", "depth_imbalance", "run_length", "vpin")
+
+
+def feature_columns(df: pl.DataFrame) -> list[str]:
+    return [c for c in df.columns if c.startswith(WINDOWED_PREFIXES) or c in POINT_COLUMNS]
+
+
+def compute_features(
+    markouts: pl.DataFrame, quotes: pl.DataFrame, config: dict, vpin_state: VpinState
+) -> tuple[pl.DataFrame, VpinState]:
+    """Append every feature column to the markouts frame, row for row."""
+    _require_sorted(markouts)
+    windows = config["feature_windows_seconds"]
+    book_trades = markouts.select(
+        "ts_event", pl.col("quoted_bid").alias("bid_px_00"), pl.col("quoted_ask").alias("ask_px_00")
+    )
+    mid_table = build_mid_table(quotes, book_trades)
+    ofi_cum = ofi_events(quotes)
+
+    parts = [
+        trade_window_features(markouts, windows),
+        ofi_features(markouts, ofi_cum, windows),
+        momentum_features(markouts, mid_table, windows),
+        point_in_time_features(markouts),
+        run_length(markouts["aggressor_side"]).to_frame(),
+    ]
+    vpin, new_state = vpin_features(
+        markouts,
+        vpin_state,
+        bucket_volume=config["_vpin_bucket_volume"],
+        window=config["vpin_window_buckets"],
+    )
+    parts.append(vpin.to_frame())
+    out = markouts
+    for part in parts:
+        out = out.hstack(part)
+    return out, new_state
+
+
+def summarize(df: pl.DataFrame, cols: list[str]) -> pl.DataFrame:
+    rows = []
+    for c in cols:
+        s = df[c].cast(pl.Float64)
+        rows.append(
+            {
+                "feature": c,
+                "n": s.len(),
+                "null_share": s.null_count() / s.len() if s.len() else 0.0,
+                "mean": s.mean(),
+                "std": s.std(),
+                "p01": s.quantile(0.01),
+                "p50": s.quantile(0.5),
+                "p99": s.quantile(0.99),
+            }
+        )
+    return pl.DataFrame(rows)
+
+
+def run_feature_checks(df: pl.DataFrame, config: dict) -> ValidationReport:
+    checks: list[CheckResult] = []
+    cols = feature_columns(df)
+
+    inf_counts = {c: int(df[c].cast(pl.Float64).is_infinite().sum()) for c in cols}
+    total_inf = sum(inf_counts.values())
+    checks.append(
+        CheckResult(
+            "no_infinities",
+            passed=total_inf == 0,
+            detail="no infinite values"
+            if total_inf == 0
+            else f"infinite counts={ {k: v for k, v in inf_counts.items() if v} }",
+        )
+    )
+
+    longest = window_label(max(config["feature_windows_seconds"]))
+    long_cols = [c for c in cols if c.startswith(WINDOWED_PREFIXES) and c.endswith(f"_{longest}")]
+    null_shares = {c: df[c].null_count() / df.height for c in long_cols} if df.height else {}
+    worst = max(null_shares.values(), default=0.0)
+    checks.append(
+        CheckResult(
+            "long_window_null_share",
+            passed=worst < 0.01,
+            detail=f"max null share over {longest}s features={worst:.2%} (limit 1%)",
+        )
+    )
+
+    if "vpin" in df.columns:
+        not_null = df["vpin"].is_not_null()
+        if not_null.any():
+            first = int(not_null.arg_max())
+            prefix_ok = bool(not_null[first:].all())
+            detail = (
+                f"vpin warm-up rows={first}, no later nulls"
+                if prefix_ok
+                else f"vpin has nulls after row {first}"
+            )
+        else:
+            prefix_ok, detail = False, "vpin is null everywhere"
+        checks.append(CheckResult("vpin_nulls_are_prefix", passed=prefix_ok, detail=detail))
+
+    range_problems = []
+    for c in cols:
+        s = df[c].cast(pl.Float64).drop_nulls()
+        if s.is_empty():
+            continue
+        lo, hi = float(s.min()), float(s.max())
+        if c.startswith("signed_imbalance_") or c == "depth_imbalance":
+            ok = -1.0 <= lo and hi <= 1.0
+        elif c == "vpin":
+            ok = 0.0 <= lo and hi <= 1.0
+        elif c.startswith(("intensity_", "realized_vol_")):
+            ok = lo >= 0.0
+        else:
+            ok = True
+        if not ok:
+            range_problems.append(f"{c}[{lo:.4g},{hi:.4g}]")
+    checks.append(
+        CheckResult(
+            "value_ranges",
+            passed=not range_problems,
+            detail="all bounded features within range"
+            if not range_problems
+            else f"out of range: {range_problems}",
+        )
+    )
+    return ValidationReport(checks=checks)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--symbol", type=str, default=None)
+    args = parser.parse_args()
+
+    config = load_config()
+    symbol = args.symbol or config["symbol"]
+    processed_dir = Path(config["data_processed_dir"])
+    output_dir = Path(config["output_dir"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    markout_paths = sorted(processed_dir.glob(f"{symbol}_*_markouts.parquet"))
+    if not markout_paths:
+        raise RuntimeError(f"No markout files found for symbol {symbol} in {processed_dir}")
+
+    daily_volume = [float(pl.read_parquet(p, columns=["size"])["size"].sum()) for p in markout_paths]
+    adv = sum(daily_volume) / len(daily_volume)
+    config["_vpin_bucket_volume"] = adv / config["vpin_buckets_per_day"]
+    print(
+        f"ADV={adv:,.0f} shares over {len(markout_paths)} days; "
+        f"VPIN bucket={config['_vpin_bucket_volume']:,.0f} shares"
+    )
+
+    state = VpinState()
+    collected = []
+    for path in markout_paths:
+        day_str = path.stem.split(f"{symbol}_", 1)[1].rsplit("_markouts", 1)[0]
+        markouts = pl.read_parquet(path)
+        quotes = pl.read_parquet(processed_dir / f"{symbol}_{day_str}_quotes.parquet")
+        feats, state = compute_features(markouts, quotes, config, state)
+        out_path = processed_dir / f"{symbol}_{day_str}_features.parquet"
+        feats.write_parquet(out_path)
+        collected.append(feats.select(feature_columns(feats)))
+        print(f"{day_str}: wrote {len(feats)} rows x {len(feature_columns(feats))} features -> {out_path}")
+
+    all_feats = pl.concat(collected)
+    summary = summarize(all_feats, feature_columns(all_feats))
+    summary_path = output_dir / f"{symbol}_feature_summary.csv"
+    summary.write_csv(summary_path)
+    print(f"Wrote {summary_path}")
+
+    report = run_feature_checks(all_feats, config)
+    print_report(report)
+    if not report.all_blocking_passed:
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()

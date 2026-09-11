@@ -182,3 +182,103 @@ def test_vpin_buckets_carry_state_across_days():
     assert state.completed_imbalances == pytest.approx([0.0, 1.0, 0.8])
     assert state.bucket_sell == pytest.approx(20.0)
     assert state.bucket_buy == pytest.approx(0.0)
+
+
+def _config():
+    return {
+        "feature_windows_seconds": [5, 60],
+        "vpin_buckets_per_day": 50,
+        "vpin_window_buckets": 50,
+        "_vpin_bucket_volume": 1000.0,
+    }
+
+
+def _markouts_fixture() -> pl.DataFrame:
+    return _frame(
+        {
+            "ts_event": [_ts(0), _ts(0), _ts(10)],
+            "price": [100.01, 100.02, 100.00],
+            "size": [100, 50, 200],
+            "aggressor_side": [1, 1, -1],
+            "quoted_bid": [100.00, 100.01, 100.00],
+            "quoted_ask": [100.01, 100.02, 100.01],
+            "quoted_spread": [0.01, 0.01, 0.01],
+            "mid_at_fill": [100.005, 100.015, 100.005],
+            "quoted_bid_sz": [100, 100, 300],
+            "quoted_ask_sz": [200, 200, 100],
+            "markout_0s_dollars": [0.005, 0.005, 0.005],
+        }
+    )
+
+
+def _quotes_fixture() -> pl.DataFrame:
+    return _frame(
+        {
+            "ts_event": [_ts(-1), _ts(20)],
+            "bid_px_00": [100.00, 100.00],
+            "ask_px_00": [100.01, 100.01],
+            "bid_sz_00": [100, 100],
+            "ask_sz_00": [200, 200],
+        }
+    )
+
+
+def test_compute_features_appends_columns_and_keeps_rows():
+    from src.features import VpinState, compute_features, feature_columns
+
+    markouts = _markouts_fixture()
+    out, state = compute_features(markouts, _quotes_fixture(), _config(), VpinState())
+
+    assert out.height == 3
+    assert out.columns[: markouts.width] == markouts.columns
+    assert out.select(markouts.columns).equals(markouts)
+    expected = {
+        "signed_imbalance_5", "intensity_5", "realized_vol_5", "ofi_5", "momentum_5",
+        "signed_imbalance_60", "intensity_60", "realized_vol_60", "ofi_60", "momentum_60",
+        "spread_bps", "depth_imbalance", "run_length", "vpin",
+    }
+    assert set(feature_columns(out)) == expected
+    # tied sweep legs see nothing; the t=10 trade sees both legs only in the
+    # 60 s window ([5, 10) for W=5 is empty)
+    assert out["signed_imbalance_5"].to_list() == [None, None, None]
+    assert out["signed_imbalance_60"].to_list() == pytest.approx([None, None, 1.0])
+    assert out["run_length"].to_list() == [0, 1, 2]
+    assert state.cum_volume == pytest.approx(350.0)
+
+
+def test_summarize_reports_null_share_and_quantiles():
+    from src.features import summarize
+
+    df = pl.DataFrame({"a": [1.0, None, 3.0, 4.0], "b": [0.0, 0.0, 0.0, 0.0]})
+    s = summarize(df, ["a", "b"])
+    assert s.columns == ["feature", "n", "null_share", "mean", "std", "p01", "p50", "p99"]
+    row = s.filter(pl.col("feature") == "a").row(0, named=True)
+    assert row["n"] == 4
+    assert row["null_share"] == pytest.approx(0.25)
+    assert row["mean"] == pytest.approx(8 / 3)
+
+
+def test_feature_checks_catch_infinity_and_vpin_gap():
+    from src.features import run_feature_checks
+
+    good = pl.DataFrame(
+        {
+            "signed_imbalance_60": [0.1, -0.2, 0.3],
+            "ofi_60": [1.0, 2.0, 3.0],
+            "intensity_60": [1.0, 2.0, 3.0],
+            "momentum_60": [0.0, 1.0, -1.0],
+            "realized_vol_60": [0.0, 1.0, 2.0],
+            "depth_imbalance": [0.0, 0.5, -0.5],
+            "vpin": [None, 0.3, 0.4],
+        }
+    )
+    assert run_feature_checks(good, _config()).all_blocking_passed
+
+    inf = good.with_columns(pl.Series("ofi_60", [1.0, float("inf"), 3.0]))
+    report = run_feature_checks(inf, _config())
+    assert not report.all_blocking_passed
+    assert any(c.name == "no_infinities" and not c.passed for c in report.checks)
+
+    gap = good.with_columns(pl.Series("vpin", [None, 0.3, None]))
+    report = run_feature_checks(gap, _config())
+    assert any(c.name == "vpin_nulls_are_prefix" and not c.passed for c in report.checks)
