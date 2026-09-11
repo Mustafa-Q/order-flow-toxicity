@@ -32,22 +32,26 @@ quoted half-spread do you still have *h* seconds after the fill?
 
 ![SPY passive-fill markout decay](markout/output/SPY_markout_curve.png)
 
-Size-weighted means, 2 trading days (2026-07-17 and 2026-07-20), 209,543
-trades, Nasdaq (`XNAS.ITCH`) top-of-book:
+Size-weighted means over 19 trading days, 2026-06-23 to 2026-07-20 (July 3
+was a market holiday), 1,894,154 trades, Nasdaq (`XNAS.ITCH`) top-of-book.
+Standard errors are clustered on daily means (18 degrees of freedom).
 
-| Horizon | Markout (bps) | Fraction of half-spread retained |
-|---|---|---|
-| 0 s | +0.124 | +0.96 |
-| 0.1 s | -0.020 | -0.48 |
-| 1 s | -0.031 | -0.54 |
-| 10 s | -0.042 | -0.57 |
-| 60 s | -0.039 | -0.57 |
-| 120 s | -0.104 | -1.32 |
+| Horizon | Markout (bps) | t-stat | Fraction of half-spread retained |
+|---|---|---|---|
+| 0 s | +0.127 | 29.7 | +0.96 |
+| 0.1 s | -0.014 | -3.0 | -0.44 |
+| 1 s | -0.017 | -2.6 | -0.52 |
+| 10 s | -0.019 | -2.1 | -0.54 |
+| 60 s | -0.034 | -1.8 | -0.63 |
+| 120 s | -0.083 | -2.2 | -1.16 |
 
 Reading: at t=0 the passive fill has earned the half-spread (the sign
 convention check, `X(0) = +half spread`, passes on real data). Within 100
 milliseconds the mid has moved through the fill price and the position is
-underwater by roughly half a half-spread, and it never recovers. On this
+underwater by roughly half a half-spread. It never recovers; the mid keeps
+drifting slowly against the fill out to two minutes. The sub-second loss is
+statistically clear across days; beyond about a minute the day-to-day
+variance is large and the point estimates should be read loosely. On this
 feed, naive passive liquidity provision in SPY is adversely selected almost
 immediately. The full table with equal-weighted means and standard errors is
 in [`markout/output/SPY_markout_table.csv`](markout/output/SPY_markout_table.csv);
@@ -56,10 +60,8 @@ the size-quintile cut is in
 
 ### Read the caveats before quoting this
 
-1. **Two trading days.** Standard errors cluster on daily means, so with two
-   days they have one degree of freedom. The shaded bands on the chart are
-   not meaningful yet. The pipeline is built for a 20-day window; the
-   remaining 18 days have not been pulled (see "Data" below).
+1. **One month of data.** Nineteen trading days in June and July 2026,
+   one regime. Nothing here is established as regime-independent.
 2. **Single-venue book.** The mid is Nasdaq's top of book, not the NBBO.
    A fill at Nasdaq's ask often *is* the event that empties that level, so
    the Nasdaq mid ticks against you mechanically. That biases measured
@@ -98,12 +100,20 @@ classified by the quote rule (above mid = buy-initiated, below = sell). That
 share is reported per day by `clean.py` and is under the 5% threshold at
 which the pipeline stops and refuses to proceed.
 
-Per-day cleaning summary for the two days in the sample:
+Cleaning summary across the 19 trading days (per-day numbers are printed
+by `clean.py`):
 
-| Day | Raw trades (RTH) | Auction drop | Horizon drop | Flagged (excluded) | Unknown-side fallback | Final trades |
-|---|---|---|---|---|---|---|
-| 2026-07-17 | 118,272 | 1,207 | 3,706 | 10,771 | 3.5% | 102,588 |
-| 2026-07-20 | 117,662 | 930 | 3,052 | 6,725 | 2.1% | 106,955 |
+| Step | Trades |
+|---|---|
+| Regular-hours trades in raw pull | 2,147,844 |
+| Dropped: within 5 s of open or close | 19,324 |
+| Dropped: less than 120 s before close (no valid 120 s horizon) | 72,781 |
+| Excluded to audit file: `flags == 128` | 161,585 |
+| **Final sample** | **1,894,154** |
+
+The unknown-side fallback share ranged from 2.1% to 3.5% per day (2.8%
+trade-weighted). The one holiday in the window, 2026-07-03, came back from
+Databento as an empty pull and is skipped by `clean.py`.
 
 ## Repo layout
 

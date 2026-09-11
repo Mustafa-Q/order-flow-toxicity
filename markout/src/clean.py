@@ -131,8 +131,16 @@ def split_by_flags(trades: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
     return normal, excluded
 
 
-def clean_day(raw_path: Path, config: dict) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, dict]:
+def clean_day(
+    raw_path: Path, config: dict
+) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, dict] | None:
+    """Returns None for a zero-row raw file (a market holiday inside the
+    fetch window comes back from Databento empty) so the caller can skip the
+    day instead of writing empty processed files that would later zero out
+    the trade-count-stability validation check."""
     raw = pl.read_parquet(raw_path)
+    if raw.height == 0:
+        return None
     raw = to_eastern(raw)
     raw = filter_regular_hours(raw, config["session_start"], config["session_end"], config["timezone"])
 
@@ -181,7 +189,11 @@ def main():
 
     for raw_path in sorted(raw_dir.glob(f"{symbol}_*.parquet")):
         day_str = raw_path.stem.split(f"{symbol}_", 1)[1]
-        trades, quotes, excluded_trades, stats = clean_day(raw_path, config)
+        result = clean_day(raw_path, config)
+        if result is None:
+            print(f"{day_str}: raw file has 0 rows (market holiday?), skipping")
+            continue
+        trades, quotes, excluded_trades, stats = result
         trades.write_parquet(processed_dir / f"{symbol}_{day_str}_trades.parquet")
         quotes.write_parquet(processed_dir / f"{symbol}_{day_str}_quotes.parquet")
         excluded_trades.write_parquet(

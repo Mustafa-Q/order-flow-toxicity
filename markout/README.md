@@ -77,8 +77,10 @@ uv run python -m src.plot --symbol SYNTH
 
 ## What the real data showed
 
-Two days of `XNAS.ITCH` are on disk (2026-07-17, 2026-07-20). The
-validation report passes all five blocking checks and the advisory one.
+Nineteen trading days of `XNAS.ITCH` are on disk (2026-06-23 to
+2026-07-20; 2026-07-03 was a holiday and comes back as a zero-row file,
+which `clean.py` skips). The validation report passes all five blocking
+checks and the advisory one on the full sample.
 The `side` field mapping (`A` = sell aggressor, `B` = buy aggressor) is
 confirmed by the `X(0)` check: a flipped mapping would flip its sign.
 
@@ -90,9 +92,10 @@ Aggressor-side coverage:
 - `XNAS.ITCH` reports 8–13% unknown side at the raw level. Every trade with
   `flags == 128` is unknown-side, and those look like non-displayed
   liquidity; they are excluded to `*_trades_excluded.parquet`
-  (10,771 and 6,725 trades on the two days). After that and the 5 s auction
-  buffer, 3.5% and 2.1% of trades remain unknown-side and are classified by
-  the quote rule. Both are under the 5% threshold at which `clean.py` stops.
+  (161,585 trades, 7.5% of regular-hours trades, across the 19 days). After
+  that and the 5 s auction buffer, 2.1% to 3.5% of trades per day remain
+  unknown-side and are classified by the quote rule, under the 5% threshold
+  at which `clean.py` stops.
 
 ## Assumptions and limitations
 
@@ -106,9 +109,9 @@ Aggressor-side coverage:
    adverse selection is biased upward relative to a consolidated benchmark.
    The mean quoted spread on this feed ($0.019) is about twice the NBBO's
    usual one tick for the same reason.
-5. Two trading days so far. Standard errors cluster on daily means and have
-   one degree of freedom; treat the bands as placeholders until the 20-day
-   window is pulled.
+5. One month of data (19 trading days). Standard errors cluster on daily
+   means, 18 degrees of freedom. Sub-second markouts are significant at
+   |t| of roughly 3; beyond a minute the bands are wide.
 6. US market holidays are not excluded from the trading-day calculation. A
    holiday in the window shows up as an empty raw file and is caught by the
    trade-count-stability check rather than silently miscounted.
@@ -121,9 +124,9 @@ Aggressor-side coverage:
 ## Status
 
 - [x] Pipeline built and validated end-to-end against synthetic data.
-- [x] Real Databento pull on `XNAS.ITCH`, two trading days, all validation
-      checks pass, chart and tables produced.
-- [ ] Remaining 18 days of the 20-day window (`--as-of 2026-07-21`).
+- [x] Real Databento pull on `XNAS.ITCH`, full 20-day window (19 trading
+      days plus one holiday), all validation checks pass, chart and tables
+      produced.
 - [ ] Phase 1 feature construction: OFI, arrival intensity, momentum, depth
       imbalance, run length, VPIN, each joined onto the per-trade markout
       table by `ts_event`.

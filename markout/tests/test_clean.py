@@ -174,3 +174,33 @@ def test_clean_day_routes_nonzero_flag_trades_to_excluded_output(tmp_path):
     assert trades["flags"].to_list() == [0, 0]
     assert excluded["flags"].to_list() == [128, 128]
     assert stats["n_excluded_flagged"] == 2
+
+
+def test_clean_day_returns_none_for_empty_raw_file(tmp_path):
+    # A market holiday inside the window comes back from Databento as a
+    # zero-row pull. clean_day must signal "nothing here" rather than
+    # writing empty processed files that later zero out the
+    # trade-count-stability check.
+    raw = pl.DataFrame(
+        {
+            "ts_event": pl.Series([], dtype=pl.Datetime("ns", time_zone="UTC")),
+            "action": pl.Series([], dtype=pl.String),
+            "side": pl.Series([], dtype=pl.String),
+            "price": pl.Series([], dtype=pl.Float64),
+            "bid_px_00": pl.Series([], dtype=pl.Float64),
+            "ask_px_00": pl.Series([], dtype=pl.Float64),
+            "flags": pl.Series([], dtype=pl.UInt8),
+        }
+    )
+    raw_path = tmp_path / "SPY_2026-07-03.parquet"
+    raw.write_parquet(raw_path)
+
+    config = {
+        "session_start": "09:30:00",
+        "session_end": "16:00:00",
+        "timezone": "America/New_York",
+        "auction_buffer_seconds": 5.0,
+        "horizons_seconds": [0, 120],
+        "aggressor_unknown_threshold": 0.05,
+    }
+    assert clean_day(raw_path, config) is None
