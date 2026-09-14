@@ -200,3 +200,62 @@ def test_walk_forward_thresholds_use_only_prior_days():
     assert th.vpin_cut[4:].tolist() == pytest.approx([np.quantile([1, 2, 3, 4, 10, 20, 30, 40], 0.75)] * 4)
     assert th.composite_cut[4:].tolist() == pytest.approx([np.quantile(-np.array([1, 2, 3, 4, 10, 20, 30, 40.0]), 0.25)] * 4)
     assert len(th.vpin_cut) == 8 and th.sit_out_rate == 0.25
+
+
+def _synthetic_features_frame(n=3000, seed=11):
+    rng = np.random.default_rng(seed)
+    n_days = 6
+    per_day = n // n_days
+    days = np.repeat([f"2026-07-{d:02d}" for d in range(1, n_days + 1)], per_day)
+    seconds = np.tile(np.sort(rng.uniform(0, 6 * 3600, per_day)), n_days) + np.repeat(
+        np.arange(n_days) * 86400, per_day
+    )
+    side = rng.choice([1, -1], size=n)
+    mid = 740.0 + rng.normal(size=n).cumsum() * 0.001
+    imb = rng.normal(size=n)
+    m5 = -0.002 * imb * side + rng.normal(scale=0.01, size=n)
+    m60 = m5 + rng.normal(scale=0.02, size=n)
+    return pl.DataFrame(
+        {
+            "ts_event": _ts_series(seconds),
+            "date": days,
+            "size": rng.integers(1, 400, size=n),
+            "aggressor_side": side,
+            "mid_at_fill": mid,
+            "signed_imbalance_5": imb,
+            "intensity_60": rng.uniform(1, 10, size=n),
+            "realized_vol_60": rng.uniform(0.5, 5, size=n),
+            "vpin": rng.uniform(0.1, 0.2, size=n),
+            "markout_0s_dollars": np.full(n, 0.005),
+            "markout_5s_dollars": m5,
+            "markout_5s_bps": m5 / mid * 1e4,
+            "markout_1s_bps": 0.5 * m5 / mid * 1e4,
+            "markout_60s_dollars": m60,
+            "markout_60s_bps": m60 / mid * 1e4,
+        }
+    )
+
+
+def _policy_config():
+    return {
+        "regression_horizons_seconds": [5, 1, 60],
+        "winsor_quantile": 0.001,
+        "policy_train_share": 0.5,
+        "policy_sit_out_rate": 0.2,
+        "policy_hold_seconds": [60, 5],
+        "max_fill_shares": 100,
+        "policy_random_seed": 0,
+    }
+
+
+def test_run_policy_pipeline_returns_aligned_masks():
+    from src.policy import POLICIES, run_policy_pipeline
+
+    run = run_policy_pipeline(_synthetic_features_frame(), _policy_config())
+    assert run.train_days == [f"2026-07-{d:02d}" for d in (1, 2, 3)]
+    assert run.test_days == [f"2026-07-{d:02d}" for d in (4, 5, 6)]
+    assert list(run.masks) == POLICIES
+    assert all(len(m) == run.test.height for m in run.masks.values())
+    assert run.masks["static"].all()
+    assert 0.6 < run.masks["composite"].mean() < 0.95
+    assert run.fit.names[0] == "const"

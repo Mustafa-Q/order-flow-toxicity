@@ -14,7 +14,7 @@ import polars as pl
 
 from src.config import load_config
 from src.features import NS_PER_SECOND, feature_columns
-from src.regress import build_design, ols_cluster
+from src.regress import OlsResult, build_design, ols_cluster
 from src.validate import CheckResult, ValidationReport, print_report
 
 POLICIES = ["static", "vpin_gated", "composite", "random"]
@@ -290,6 +290,50 @@ def plot_cumulative_pnl(
     plt.close(fig)
 
 
+@dataclass
+class PolicyRun:
+    train_days: list[str]
+    test_days: list[str]
+    test: pl.DataFrame
+    masks: dict[str, np.ndarray]
+    thresholds: Thresholds
+    fit: OlsResult
+
+
+def run_policy_pipeline(features: pl.DataFrame, config: dict) -> PolicyRun:
+    """Split, fit the Phase 2 model on train, walk-forward thresholds, and
+    the four participation masks on the test rows. `features` must already
+    be null-dropped on every feature and regression target."""
+    headline = config["regression_horizons_seconds"][0]
+    rate = config["policy_sit_out_rate"]
+    all_days = sorted(features["date"].unique().to_list())
+    train_days, test_days = split_days(all_days, config["policy_train_share"])
+    train = features.filter(pl.col("date").is_in(train_days))
+    test = features.filter(pl.col("date").is_in(test_days))
+
+    design_train = build_design(train, config)
+    fit = ols_cluster(
+        design_train.X, design_train.targets[headline], design_train.clusters, design_train.feature_names
+    )
+    predicted_train = fit.coef[0] + design_train.X @ fit.coef[1:]
+    design_test = build_design(test, config, scaler=design_train.scaler)
+    if design_test.n_dropped:
+        raise ValueError("features must be null-dropped before run_policy_pipeline")
+    predicted_test = fit.coef[0] + design_test.X @ fit.coef[1:]
+
+    # thresholds walk forward: each test day's cuts come from all strictly
+    # prior rows (train days plus earlier test days); the model itself is
+    # fixed on the train period
+    all_dates = np.concatenate([train["date"].to_numpy(), test["date"].to_numpy()])
+    all_vpin = np.concatenate([train["vpin"].to_numpy(), test["vpin"].to_numpy()])
+    all_pred = np.concatenate([predicted_train, predicted_test])
+    thresholds = walk_forward_thresholds(all_dates, all_vpin, all_pred, test_days, rate)
+    masks = participation_masks(
+        test["vpin"].to_numpy(), predicted_test, thresholds, config["policy_random_seed"]
+    )
+    return PolicyRun(train_days, test_days, test, masks, thresholds, fit)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbol", type=str, default=None)
@@ -317,32 +361,14 @@ def main():
         f"markout_{h}s_bps" for h in config["regression_horizons_seconds"]
     ]
     features = features.drop_nulls(subset=needed)
-    all_days = sorted(features["date"].unique().to_list())
-    train_days, test_days = split_days(all_days, config["policy_train_share"])
-    train = features.filter(pl.col("date").is_in(train_days))
-    test = features.filter(pl.col("date").is_in(test_days))
-
-    design_train = build_design(train, config)
-    fit = ols_cluster(
-        design_train.X, design_train.targets[headline], design_train.clusters, design_train.feature_names
+    run = run_policy_pipeline(features, config)
+    train_days, test_days, test, masks, thresholds, fit = (
+        run.train_days, run.test_days, run.test, run.masks, run.thresholds, run.fit,
     )
-    predicted_train = fit.coef[0] + design_train.X @ fit.coef[1:]
-    design_test = build_design(test, config, scaler=design_train.scaler)
-    assert design_test.n_dropped == 0
-    predicted_test = fit.coef[0] + design_test.X @ fit.coef[1:]
-
-    # thresholds walk forward: each test day's cuts come from all strictly
-    # prior rows (train days plus earlier test days); the model itself is
-    # fixed on the train period
-    all_dates = np.concatenate([train["date"].to_numpy(), test["date"].to_numpy()])
-    all_vpin = np.concatenate([train["vpin"].to_numpy(), test["vpin"].to_numpy()])
-    all_pred = np.concatenate([predicted_train, predicted_test])
-    thresholds = walk_forward_thresholds(all_dates, all_vpin, all_pred, test_days, rate)
-    masks = participation_masks(
-        test["vpin"].to_numpy(), predicted_test, thresholds, config["policy_random_seed"]
-    )
+    all_days = train_days + test_days
+    train_rows = features.height - test.height
     print(
-        f"train {train_days[0]}..{train_days[-1]} ({train.height:,} trades), "
+        f"train {train_days[0]}..{train_days[-1]} ({train_rows:,} trades), "
         f"test {test_days[0]}..{test_days[-1]} ({test.height:,} trades); "
         f"train R2={fit.r2:.4f}; walk-forward vpin_cut range "
         f"[{thresholds.vpin_cut.min():.4f}, {thresholds.vpin_cut.max():.4f}], "
