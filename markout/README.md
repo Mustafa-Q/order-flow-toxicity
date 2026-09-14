@@ -1,8 +1,13 @@
-# SPY Passive-Fill Markout Pipeline
+# SPY Order-Flow Toxicity Pipeline
 
-Phase 1, Step 1 of the order-flow-toxicity project. Computes the passive-fill
-markout decay curve for SPY: if you were the passive counterparty to every
-trade, how much of the quoted half-spread do you still have at horizon *h*?
+All the code for the order-flow-toxicity project, as one pipeline of
+standalone stages. It starts from the passive-fill markout decay curve for
+SPY (if you were the passive counterparty to every trade, how much of the
+quoted half-spread do you still have at horizon *h*?), builds the
+order-flow features and VPIN on top of it, runs the horse-race regression,
+simulates participation policies out of sample, and splits everything by
+regime. Results are in the "Phase N result" sections below; the project
+overview and bottom line are in the [root README](../README.md).
 
 Sign convention: for trade *i* at price *Pᵢ* with aggressor side *Aᵢ*
 (+1 buyer-initiated, −1 seller-initiated), the passive maker's position is
@@ -38,15 +43,18 @@ uv run python -m src.regimes              # Phase 5 regime splits
 ```
 
 `fetch.py` caches one parquet per day in `data/raw/` and never re-downloads a
-day that exists. To extend an existing window instead of starting a new one
-anchored at today, pass `--as-of`; for example, the two cached days are
-2026-07-17 and 2026-07-20, so the full 20-day window that contains them is
+day that exists. The window is `n_trading_days` ending the trading day
+before `--as-of` (default: today). The results in this repo use the 20-day
+window ending 2026-07-20 (19 trading days plus the July 3 holiday), which is
 
 ```bash
 uv run python -m src.fetch --as-of 2026-07-21
 ```
 
-Synthetic dry run (no API key needed):
+The stages after `fetch` and `clean` take seconds; `clean` and `markout`
+take a few minutes for 19 days.
+
+Synthetic dry run of the Phase 1 stages (no API key needed):
 
 ```bash
 uv run python -m src.synth
@@ -64,23 +72,31 @@ uv run python -m src.plot --symbol SYNTH
 | `src/synth.py` | Synthetic raw day in the exact `fetch.py` schema, for plumbing tests. |
 | `src/clean.py` | RTH filter (09:30–16:00 ET), UTC to New York conversion, quote validity, auction-print drop (5 s buffer), horizon-cutoff drop, `flags != 0` exclusion to a separate auditable parquet, aggressor-side classification with a quote-rule fallback. |
 | `src/markout.py` | The markout computation, all three units (dollars, bps, fraction of half-spread), horizons 0 to 120 s. Carries top-of-book sizes through for the features stage. |
-| `src/features.py` | Trailing-window order-flow features and VPIN appended to every markout row, plus a descriptive summary and four sanity checks. See "Features" below. |
+| `src/features.py` | Trailing-window order-flow features and VPIN appended to every markout row, plus a descriptive summary and five sanity checks. See "Features" below. |
+| `src/aggregate.py` | Daily size- and equal-weighted markout means, standard errors clustered on daily means, size-quintile cut. |
+| `src/validate.py` | The Phase 1 checks (`X(0)` = +half spread, buy share 45–55%, mean spread ≤ $0.02, daily trade-count stability, no NaNs, monotone-ish decay as advisory) and the `CheckResult` / `ValidationReport` types every later stage reuses for its own checks. |
+| `src/plot.py` | Two-panel markout chart (bps and fraction of half-spread, log-x, ±2 SE bands), gated on the blocking checks. |
 | `src/regress.py` | Phase 2: pooled OLS of markouts on the features with day-clustered SEs, VPIN's marginal value, leave-one-out ranking, decile sort, coefficient chart. See "Phase 2 result" below. |
 | `src/policy.py` | Phase 3: static, VPIN-gated, composite, and random participation policies evaluated out of sample with walk-forward thresholds; comparison table, daily P&L, cumulative P&L chart. See "Phase 3 result" below. |
 | `src/regimes.py` | Phase 5: the markout, the VPIN test, and the Phase 3 policy P&L within session, volatility-tercile, and volume-tercile regimes. See "Phase 5 result" below. |
-| `src/aggregate.py` | Daily size- and equal-weighted means, standard errors clustered on daily means, size-quintile cut. |
-| `src/validate.py` | Six checks: `X(0)` = +half spread, buy share 45–55%, mean spread ≤ $0.02, daily trade-count stability, no NaNs, monotone-ish decay (advisory). |
-| `src/plot.py` | Two-panel chart (bps and fraction of half-spread, log-x, ±2 SE bands), gated on the blocking checks. |
 
 ## Outputs
 
-- `output/SPY_markout_curve.png` — the chart
-- `output/SPY_markout_table.csv` — one row per horizon: means, SEs, t-stats, n
-- `output/SPY_markout_quintiles.csv` — means by trade-size quintile
-- `output/SPY_feature_summary.csv` — per-feature count, null share, mean,
-  std, and 1st/50th/99th percentiles over the whole sample
-- `data/processed/SPY_<day>_markouts.parquet` (not committed) — one tidy row
-  per trade with every horizon's markout.
+Committed, in `output/`:
+
+| Stage | Files |
+|---|---|
+| Phase 1 markout | `SPY_markout_curve.png`; `SPY_markout_table.csv` (one row per horizon: means, SEs, t-stats, n); `SPY_markout_quintiles.csv` (means by trade-size quintile) |
+| Phase 1 features | `SPY_feature_summary.csv` (per-feature count, null share, mean, std, 1st/50th/99th percentiles) |
+| Phase 2 | `SPY_horse_race.png`; `SPY_horse_race.csv` (all coefficients, three horizons); `SPY_vpin_marginal.csv`; `SPY_leave_one_out.csv`; `SPY_decile_sort.csv` |
+| Phase 3 | `SPY_policy_pnl.png`; `SPY_policy_comparison.csv` (policy × hold); `SPY_policy_daily_pnl.csv` |
+| Phase 5 | `SPY_regime_policy_pnl.png`; `SPY_regime_table.csv` |
+| synthetic dry run | `SYNTH_*` counterparts of the Phase 1 files |
+
+Not committed, in `data/processed/`:
+
+- `SPY_<day>_markouts.parquet` — one tidy row per trade with every
+  horizon's markout.
 - `data/processed/SPY_<day>_features.parquet` (not committed) — the same
   rows as the markouts file, in the same order, with the feature columns
   appended. This is the Phase 2 input: one file, no joins.
@@ -355,4 +371,6 @@ Aggressor-side coverage:
 - [x] Phase 5 regime splits: adverse selection is 3x worse at the open and
       absent at the close; VPIN is insignificant in every regime; the
       composite edge sits in calm, low-to-mid-volume trading.
-- [ ] Phase 4 write-up (the README sections are the draft).
+- [x] Phase 4 write-up: the "Phase N result" sections in this file and the
+      bottom line in the root README are the write-up; there is no separate
+      document.

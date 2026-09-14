@@ -22,8 +22,23 @@ of ticks.
 | 1 | Feature construction: markout curve, then order-flow features + VPIN | **Done on real data** |
 | 2 | Horse-race regression: markout ~ features, isolate VPIN's contribution | **Done: VPIN adds nothing** |
 | 3 | Simulated quoting policies (static / VPIN-gated / composite toxicity) | **Done: composite helps at 5 s, VPIN is a two-day effect** |
-| 4 | Policy comparison write-up | not started |
-| 5 | (stretch) Regime splits: open vs. midday, news vs. ordinary days | **Done: session, volatility, volume splits** |
+| 4 | Policy comparison write-up | **Done: the result sections below and in `markout/README.md`** |
+| 5 | (stretch) Regime splits: open vs. midday, volatility, volume | **Done: session, volatility, volume splits** |
+
+## Bottom line
+
+On Nasdaq's book, a passive fill in SPY has earned the half-spread at the
+instant of the fill and is underwater 100 milliseconds later. What predicts
+that loss is the state of the book at the moment of the fill, above all how
+thin the queue is on the side being hit, not the history of order flow.
+VPIN, the standard toxicity measure, adds nothing to that prediction in the
+full sample or in any session, volatility, or volume regime. A maker who
+stands down on the one fill in five that the book-state model flags turns a
+losing book into a break-even one out of sample, but only over a holding
+horizon of a few seconds, and mostly in calm trading. Reacting to VPIN
+alone selects days rather than trades, and in this sample its benefit rests
+on two days. All of this is one month of data on a single venue; the
+caveats section says what that does and does not license.
 
 ## Headline result: the SPY passive-fill markout curve
 
@@ -149,7 +164,7 @@ volume-tercile regimes.
 Full table and caveats in
 [`markout/README.md`](markout/README.md#phase-5-result-regime-splits).
 
-### Read the caveats before quoting this
+## Caveats that apply to every result
 
 1. **One month of data.** Nineteen trading days in June and July 2026,
    one regime. Nothing here is established as regime-independent.
@@ -209,12 +224,14 @@ Databento as an empty pull and is skipped by `clean.py`.
 ## Repo layout
 
 ```
-markout/            Phase 1, Step 1: the markout pipeline (see markout/README.md)
-  src/              fetch -> clean -> markout -> aggregate -> validate -> plot
-  tests/            30 pytest tests
-  output/           committed aggregate results (chart + CSVs)
-  config.yaml       symbol, dataset, horizons, session, thresholds
-docs/superpowers/   design spec and implementation plan for the pipeline
+markout/            all code (see markout/README.md)
+  src/              fetch -> clean -> markout -> features -> aggregate -> plot
+                    -> regress (Phase 2) -> policy (Phase 3) -> regimes (Phase 5)
+                    plus synth (synthetic data) and validate (shared checks)
+  tests/            73 pytest tests, one file per stage
+  output/           committed results: 4 charts and 10 tables for SPY, plus SYNTH_* dry-run files
+  config.yaml       every parameter, grouped by stage
+docs/superpowers/   one design spec and one implementation plan per phase
 ```
 
 ## Running it
@@ -225,13 +242,19 @@ uv sync
 cp .env.example .env        # add your Databento key
 uv run pytest
 uv run python -m src.fetch --max-days 1     # one day first; prints cost estimate
+uv run python -m src.fetch --as-of 2026-07-21       # then the full window that ends 2026-07-20
 uv run python -m src.clean
 uv run python -m src.markout
+uv run python -m src.features
 uv run python -m src.aggregate
-uv run python -m src.plot                   # runs validation checks, then draws the chart
+uv run python -m src.plot                   # Phase 1: validation checks, then the markout chart
+uv run python -m src.regress                # Phase 2
+uv run python -m src.policy                 # Phase 3
+uv run python -m src.regimes                # Phase 5
 ```
 
-There is also a synthetic-data path (`python -m src.synth`, then every stage
-with `--symbol SYNTH`) that exercises the whole pipeline with no API key.
-Details, assumptions, and the validation checks are in
+Every stage prints a validation report and exits non-zero if a blocking
+check fails. There is also a synthetic-data path (`python -m src.synth`,
+then the Phase 1 stages with `--symbol SYNTH`) that exercises the plumbing
+with no API key. Details, assumptions, and the checks are in
 [`markout/README.md`](markout/README.md).

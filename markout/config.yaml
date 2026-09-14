@@ -1,7 +1,10 @@
+# --- data pull (fetch.py) ---
 symbol: SPY
 stype_in: raw_symbol
 schema: mbp-1
 n_trading_days: 20
+
+# --- markout (clean.py, markout.py, validate.py) ---
 horizons_seconds: [0, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120]
 session_start: "09:30:00"
 session_end: "16:00:00"
@@ -12,17 +15,25 @@ dataset_override: "XNAS.ITCH"
 data_raw_dir: "data/raw"
 data_processed_dir: "data/processed"
 output_dir: "output"
+
+# --- features (features.py) ---
 feature_windows_seconds: [5, 60]
 vpin_buckets_per_day: 50
 vpin_window_buckets: 50
+
+# --- Phase 2 regression (regress.py); first horizon is the headline ---
 regression_horizons_seconds: [5, 1, 60]
 winsor_quantile: 0.001
 n_deciles: 10
+
+# --- Phase 3 policies (policy.py); first hold is the headline ---
 policy_train_share: 0.5
 policy_sit_out_rate: 0.2
 policy_hold_seconds: [60, 5]
 max_fill_shares: 100
 policy_random_seed: 0
+
+# --- Phase 5 regimes (regimes.py) ---
 regime_open_end: "10:00:00"
 regime_close_start: "15:30:00"
 regime_chart_hold_seconds: 5
