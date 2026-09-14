@@ -23,3 +23,6 @@ policy_sit_out_rate: 0.2
 policy_hold_seconds: [60, 5]
 max_fill_shares: 100
 policy_random_seed: 0
+regime_open_end: "10:00:00"
+regime_close_start: "15:30:00"
+regime_chart_hold_seconds: 5
