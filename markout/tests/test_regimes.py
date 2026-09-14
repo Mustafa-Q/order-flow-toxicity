@@ -73,3 +73,40 @@ def test_weighted_mean_clustered_reduces_to_s_over_root_n_and_hand_case():
     )
     assert mean == pytest.approx(2.625)
     assert se == pytest.approx(0.875)
+
+
+def test_regime_table_partitions_and_checks():
+    from src.policy import run_policy_pipeline
+    from src.regimes import assign_regimes, regime_table, run_regime_checks
+    from src.regress import build_design
+    from tests.test_policy import _policy_config, _synthetic_features_frame
+
+    config = {**_policy_config(), **_config(), "regime_chart_hold_seconds": 5}
+    feats = assign_regimes(_synthetic_features_frame(n=6000), config)
+    design = build_design(feats, config)
+    run = run_policy_pipeline(feats, config)
+    table = regime_table(feats, design, run, config)
+
+    assert table["split"].to_list() == ["session"] * 3 + ["volatility"] * 3 + ["volume"] * 3
+    assert table["regime"].to_list() == [
+        "open", "midday", "close", "low", "mid", "high", "low", "mid", "high",
+    ]
+    for split in ["session", "volatility", "volume"]:
+        assert table.filter(pl.col("split") == split)["n_trades"].sum() == feats.height
+    # the synthetic day runs 09:30-15:30, so the close regime is empty and
+    # must come through as a zero row rather than a crash
+    assert table.filter(pl.col("regime") == "close")["n_trades"][0] == 0
+    assert {
+        "markout_5_bps_sw", "markout_5_se", "vpin_t", "vpin_delta_r2", "top_feature",
+        "pnl_composite_5s", "fill_rate_static_60s", "composite_vs_static_t_5s",
+    } <= set(table.columns)
+    filled = table.filter(pl.col("n_trades") > 0)
+    assert (filled["fill_rate_static_5s"] == 1.0).all()
+
+    terciles = table.filter(pl.col("split") != "session")
+    assert run_regime_checks(feats, terciles, min_days=3, min_trades=100).all_blocking_passed
+    assert not run_regime_checks(feats, table, min_days=3, min_trades=100).all_blocking_passed  # empty close
+
+    broken = terciles.with_columns(pl.Series("n_trades", terciles["n_trades"].to_numpy() + 1))
+    report = run_regime_checks(feats, broken, min_days=3, min_trades=100)
+    assert any(c.name == "splits_partition_rows" and not c.passed for c in report.checks)

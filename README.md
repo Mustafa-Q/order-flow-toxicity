@@ -23,7 +23,7 @@ of ticks.
 | 2 | Horse-race regression: markout ~ features, isolate VPIN's contribution | **Done: VPIN adds nothing** |
 | 3 | Simulated quoting policies (static / VPIN-gated / composite toxicity) | **Done: composite helps at 5 s, VPIN is a two-day effect** |
 | 4 | Policy comparison write-up | not started |
-| 5 | (stretch) Regime splits: open vs. midday, news vs. ordinary days | not started |
+| 5 | (stretch) Regime splits: open vs. midday, news vs. ordinary days | **Done: session, volatility, volume splits** |
 
 ## Headline result: the SPY passive-fill markout curve
 
@@ -125,6 +125,29 @@ down on two bad days, which nine days cannot separate from luck.
 Full table, the 60-second results, and caveats (nine test days, no queue
 model, no hedging, single-venue book) are in
 [`markout/README.md`](markout/README.md#phase-3-result-does-reacting-to-toxicity-help).
+
+## Phase 5 result: where the effects live
+
+The same three answers within session, volatility-tercile, and
+volume-tercile regimes.
+
+![Policy P&L by regime](markout/output/SPY_regime_policy_pnl.png)
+
+- **Adverse selection is three times worse at the open** (−0.062 bps at
+  5 s) than midday (−0.019), and absent at the close (+0.011), where the
+  loss only appears at 60 s. At the open the quoted spread, not depth, is
+  the strongest predictor.
+- **VPIN matters in no regime.** Its t-statistic is between −1.0 and 2.1
+  across all nine and its R-squared contribution rounds to zero in every
+  one; depth imbalance on the hit side is the top feature in eight of
+  nine.
+- **The composite policy's edge lives in calm trading.** Versus static at
+  a 5-second hold, paired t of 4.5 to 7.7 in low and mid volatility and
+  low and mid volume, about 2 at the open and midday, and under 1.3 when
+  the book is busy or near the close, where every policy does equally well.
+
+Full table and caveats in
+[`markout/README.md`](markout/README.md#phase-5-result-regime-splits).
 
 ### Read the caveats before quoting this
 

@@ -34,6 +34,7 @@ uv run python -m src.aggregate
 uv run python -m src.plot                 # validation report, then the chart
 uv run python -m src.regress              # Phase 2 horse-race regression
 uv run python -m src.policy               # Phase 3 quoting-policy comparison
+uv run python -m src.regimes              # Phase 5 regime splits
 ```
 
 `fetch.py` caches one parquet per day in `data/raw/` and never re-downloads a
@@ -66,6 +67,7 @@ uv run python -m src.plot --symbol SYNTH
 | `src/features.py` | Trailing-window order-flow features and VPIN appended to every markout row, plus a descriptive summary and four sanity checks. See "Features" below. |
 | `src/regress.py` | Phase 2: pooled OLS of markouts on the features with day-clustered SEs, VPIN's marginal value, leave-one-out ranking, decile sort, coefficient chart. See "Phase 2 result" below. |
 | `src/policy.py` | Phase 3: static, VPIN-gated, composite, and random participation policies evaluated out of sample with walk-forward thresholds; comparison table, daily P&L, cumulative P&L chart. See "Phase 3 result" below. |
+| `src/regimes.py` | Phase 5: the markout, the VPIN test, and the Phase 3 policy P&L within session, volatility-tercile, and volume-tercile regimes. See "Phase 5 result" below. |
 | `src/aggregate.py` | Daily size- and equal-weighted means, standard errors clustered on daily means, size-quintile cut. |
 | `src/validate.py` | Six checks: `X(0)` = +half spread, buy share 45–55%, mean spread ≤ $0.02, daily trade-count stability, no NaNs, monotone-ish decay (advisory). |
 | `src/plot.py` | Two-panel chart (bps and fraction of half-spread, log-x, ±2 SE bands), gated on the blocking checks. |
@@ -238,6 +240,58 @@ on is partly Nasdaq-level depletion that a consolidated quote would soften.
 P&L in bps of notional is about 0.01 either way; the sample is a one-tick
 book and the numbers are small by construction.
 
+## Phase 5 result: regime splits
+
+Three splits of the same per-trade table: session (open 09:30 to 10:00,
+midday, close 15:30 to 16:00), terciles of trailing 60 s realized vol,
+and terciles of trailing 60 s trade intensity. Per regime: the
+size-weighted mean markout with a day-clustered SE, the Phase 2 full
+model refit on the regime's rows (VPIN's t and the top feature), and the
+Phase 3 policies' out-of-sample P&L on the regime's test trades using the
+already-fitted masks. Full table:
+[`output/SPY_regime_table.csv`](output/SPY_regime_table.csv).
+
+![Policy P&L by regime](output/SPY_regime_policy_pnl.png)
+
+| Regime | Share | 5 s markout (bps, SE) | VPIN t | Top feature (t) | Composite vs static at 5 s, paired t |
+|---|---|---|---|---|---|
+| open | 12% | −0.062 (0.026) | 0.8 | spread_bps (2.9) | 1.9 |
+| midday | 71% | −0.019 (0.008) | 1.0 | depth_imbalance (−5.5) | 2.2 |
+| close | 17% | +0.011 (0.011) | 0.3 | depth_imbalance (−7.5) | 0.7 |
+| low vol | 33% | +0.005 (0.007) | 1.7 | depth_imbalance (−7.2) | 4.5 |
+| mid vol | 33% | −0.029 (0.010) | 1.9 | depth_imbalance (−6.6) | 4.9 |
+| high vol | 33% | −0.032 (0.022) | −1.0 | depth_imbalance (−3.9) | 1.2 |
+| low volume | 33% | −0.022 (0.007) | 2.1 | depth_imbalance (−8.0) | 7.7 |
+| mid volume | 33% | −0.023 (0.008) | 1.1 | depth_imbalance (−7.7) | 5.5 |
+| high volume | 33% | −0.011 (0.019) | −0.7 | depth_imbalance (−4.2) | 0.7 |
+
+**Is adverse selection worse at the open?** Yes, by about three times:
+−0.062 bps at 5 s against −0.019 midday. At the close it is gone; passive
+fills in the last half hour keep the half-spread on average at 5 s
+(+0.011, not distinguishable from zero) and the loss only shows up at 60 s.
+The open is also the one regime where the quoted spread, not depth, is
+the strongest predictor: wide quotes at the open are the toxic ones.
+
+**Is there a regime where VPIN matters?** No. VPIN's t-statistic is
+between −1.0 and 2.1 in all nine regimes and its R² contribution rounds
+to zero in every one. Where it is closest to significant (low volume,
+t = 2.1) the sign is positive, meaning higher VPIN went with better
+markouts, the opposite of the toxicity story. Depth imbalance on the hit
+side is the top feature in eight of nine regimes.
+
+**Where does the composite policy earn its edge?** In calm, ordinary
+trading. Against static at the 5 s hold it wins in every regime, but the
+paired t is 4.5 to 7.7 in the low- and mid-volatility and low- and
+mid-volume terciles, 1.9 to 2.2 at the open and midday, and under 1.3 in
+the high-volatility, high-volume, and close regimes, where every policy
+does about equally well and the static book is itself profitable. The
+signal identifies bad fills when the book is quiet; when it is busy,
+there is less to avoid.
+
+**Caveats.** The test period for the policy columns is still 9 days, so
+the regime-level paired t-statistics rest on 9 daily differences each.
+Tercile cuts are full-sample. Everything else from Phases 1 to 3 applies.
+
 ## What the real data showed
 
 Nineteen trading days of `XNAS.ITCH` are on disk (2026-06-23 to
@@ -298,4 +352,7 @@ Aggressor-side coverage:
 - [x] Phase 3 simulated quoting policies, out of sample: the composite
       policy is the only profitable one and only at its own 5 s horizon
       (t = 2.6); VPIN gating is a two-day effect (t = 1.4).
-- [ ] Phase 4 write-up; Phase 5 (stretch) regime splits.
+- [x] Phase 5 regime splits: adverse selection is 3x worse at the open and
+      absent at the close; VPIN is insignificant in every regime; the
+      composite edge sits in calm, low-to-mid-volume trading.
+- [ ] Phase 4 write-up (the README sections are the draft).
